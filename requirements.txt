@@ -1,0 +1,14 @@
+--index-url https://download.pytorch.org/whl/cu126
+--extra-index-url https://pypi.org/simple
+
+# torchvision
+# torchaudio
+transformers>=4.46,<5
+accelerate>=0.34,<1
+sentencepiece>=0.2,<1
+safetensors>=0.4,<1
+python-dotenv>=1.0,<2
+# custom
+torch
+datasets
+peft
