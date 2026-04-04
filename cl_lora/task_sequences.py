@@ -410,20 +410,25 @@ SEQUENCES = {
 )
 }
 
+# TRACE_SEQUENCE = Sequence(
+#     name="TRACE",
+#     task_type="mixed",
+#     tasks=[
+#         TRACE_CSTANCE,
+#         TRACE_FOMC,
+#         TRACE_MEETINGBANK,
+#         TRACE_PY150,
+#         TRACE_SCIENCEQA,
+#         TRACE_NUMGLUE,
+#     ],
+#     description="TRACE benchmark: C-STANCE → FOMC → MeetingBank → Py150 → ScienceQA → NumGLUE-cm",
+# )
 TRACE_SEQUENCE = Sequence(
-    name="TRACE",
-    task_type="mixed",
-    tasks=[
-        TRACE_CSTANCE,
-        TRACE_FOMC,
-        TRACE_MEETINGBANK,
-        TRACE_PY150,
-        TRACE_SCIENCEQA,
-        TRACE_NUMGLUE,
-    ],
-    description="TRACE benchmark: C-STANCE → FOMC → MeetingBank → Py150 → ScienceQA → NumGLUE-cm",
+	name="NI-Seq-Dummy",
+	task_type="mixed",
+	tasks=[NI363, NI618],
+	description="Dev-only 2-task sequence: SST2 -> Amazon review summary",
 )
-
 
 # ---------------------------------------------------------------------------
 # General evaluation tasks (never used for training — GP / IP metrics)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import json
 import re
@@ -22,18 +23,23 @@ def _extract_primary_metric(task_result: Dict[str, float]) -> float | None:
     preferred = [
         "acc_norm,none",
         "acc,none",
-        "exact_match,none",
+        "exact_match,get-answer",
         "f1,none",
         "rougeL,none",
         "bleu,none",
     ]
-    for key in preferred:
-        if key in task_result:
-            return float(task_result[key])
-
-    for value in task_result.values():
-        if isinstance(value, (int, float)):
+    # Fallback: any exact_match or acc key (catches variant suffixes)
+    for key, value in task_result.items():
+        if isinstance(value, float) and (
+            key.startswith("exact_match,") or key.startswith("acc,")
+        ):
             return float(value)
+
+    # Last resort: first float that isn't stderr or sample_len
+    for key, value in task_result.items():
+        if isinstance(value, float) and "stderr" not in key:
+            return float(value)
+
     return None
 
 
@@ -55,61 +61,18 @@ def _build_hflm(model, tokenizer, device: str = "cuda", dtype: str = "bfloat16")
     return hflm_cls(pretrained=model, tokenizer=tokenizer, device=device, dtype=dtype)
 
 
-def _parse_available_fewshot_from_assertion(exc: AssertionError) -> int | None:
-    text = str(exc)
-    match = re.search(r"exceeds the\s+(\d+)\s+that are available", text)
-    if not match:
-        return None
+@contextlib.contextmanager
+def _left_padding_for_generation(tokenizer):
+    prev_padding_side = getattr(tokenizer, "padding_side", "right")
+    prev_pad_token = getattr(tokenizer, "pad_token", None)
     try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
-
-def _safe_simple_evaluate_single_task(
-    lm_eval,
-    lm,
-    task_name: str,
-    num_fewshot: int,
-    batch_size: int,
-) -> tuple[Dict[str, Any], int]:
-    """Evaluate one lm-eval task and auto-retry if requested few-shot exceeds availability."""
-    try:
-        out = lm_eval.simple_evaluate(
-            model=lm,
-            tasks=[task_name],
-            num_fewshot=num_fewshot,
-            batch_size=batch_size,
-        )
-        return out.get("results", {}), num_fewshot
-    except AssertionError as exc:
-        available = _parse_available_fewshot_from_assertion(exc)
-        if available is None:
-            raise
-        warnings.warn(
-            f"Task '{task_name}' supports at most {available} few-shot examples; "
-            f"retrying from requested {num_fewshot}.",
-            stacklevel=2,
-        )
-        out = lm_eval.simple_evaluate(
-            model=lm,
-            tasks=[task_name],
-            num_fewshot=available,
-            batch_size=batch_size,
-        )
-        return out.get("results", {}), available
-
-
-def _ip_fewshot_for_task(task_name: str) -> int:
-    """Use task-specific few-shot for IP pass.
-
-    - BBH object counting: 3-shot (dataset supports 3 exemplar few-shots)
-    - Other general lm-eval tasks: 5-shot
-    """
-    lowered = task_name.lower()
-    if "bbh" in lowered and "object_counting" in lowered:
-        return 3
-    return 5
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        yield
+    finally:
+        tokenizer.padding_side = prev_padding_side
+        tokenizer.pad_token = prev_pad_token
 
 
 LM_EVAL_TASK_ALIASES = {
@@ -156,6 +119,62 @@ def _resolve_general_eval_tasks(task_names: list[str]) -> tuple[list[str], list[
         resolved.append(selected)
 
     return resolved, skipped
+
+
+def _parse_available_fewshot_from_assertion(exc: AssertionError) -> int | None:
+    text = str(exc)
+    match = re.search(r"exceeds the\s+(\d+)\s+that are available", text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _safe_simple_evaluate_group(
+    lm_eval,
+    lm,
+    tasks: list[str],
+    num_fewshot: int,
+    batch_size: int,
+) -> tuple[Dict[str, Any], Dict[str, int]]:
+    """Evaluate a group of tasks in one lm-eval call.
+
+    Keeps throughput high versus one-call-per-task. If few-shot exceeds the
+    available examples for this task group, retry the full group with the
+    parsed available value.
+    """
+    if not tasks:
+        return {}, {}
+
+    requested = num_fewshot
+    try:
+        out = lm_eval.simple_evaluate(
+            model=lm,
+            tasks=tasks,
+            num_fewshot=requested,
+            batch_size=batch_size,
+        )
+        return out.get("results", {}), {task_name: requested for task_name in tasks}
+    except AssertionError as exc:
+        available = _parse_available_fewshot_from_assertion(exc)
+        if available is None:
+            raise
+        if available >= requested:
+            raise
+        warnings.warn(
+            "One or more tasks in this group do not support the requested "
+            f"few-shot={requested}; retrying the group with few-shot={available}.",
+            stacklevel=2,
+        )
+        out = lm_eval.simple_evaluate(
+            model=lm,
+            tasks=tasks,
+            num_fewshot=available,
+            batch_size=batch_size,
+        )
+        return out.get("results", {}), {task_name: available for task_name in tasks}
 
 
 def _build_alpaca_prompt(instruction: str, input_text: str) -> str:
@@ -238,32 +257,33 @@ def _evaluate_alpaca_rouge_l(
     ]
     references = [str(ex.get("output", "")).strip() for ex in test_examples]
 
-    for start in range(0, len(prompts), batch_size):
-        batch_prompts = prompts[start : start + batch_size]
-        batch_refs = references[start : start + batch_size]
+    with _left_padding_for_generation(tokenizer):
+        for start in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[start : start + batch_size]
+            batch_refs = references[start : start + batch_size]
 
-        encoded = tokenizer(
-            batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_input_length,
-        )
-        encoded = {k: v.to(device) for k, v in encoded.items()}
+            encoded = tokenizer(
+                batch_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_input_length,
+            )
+            encoded = {k: v.to(device) for k, v in encoded.items()}
 
-        outputs = model.generate(
-            **encoded,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
+            outputs = model.generate(
+                **encoded,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
 
-        prompt_lengths = encoded["attention_mask"].sum(dim=1).tolist()
-        for i, ref in enumerate(batch_refs):
-            continuation_ids = outputs[i, int(prompt_lengths[i]) :]
-            prediction = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
-            rouge_scores.append(_rouge_l_f1(prediction, ref))
+            prompt_lengths = encoded["attention_mask"].sum(dim=1).tolist()
+            for i, ref in enumerate(batch_refs):
+                continuation_ids = outputs[i, int(prompt_lengths[i]) :]
+                prediction = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
+                rouge_scores.append(_rouge_l_f1(prediction, ref))
 
     return _mean(rouge_scores)
 
@@ -347,35 +367,36 @@ def _evaluate_task_with_generation(
     prompts = eval_dataset["prompt"]
     targets = eval_dataset["target"]
 
-    for start in range(0, len(prompts), batch_size):
-        batch_prompts = prompts[start : start + batch_size]
-        batch_targets = targets[start : start + batch_size]
+    with _left_padding_for_generation(tokenizer):
+        for start in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[start : start + batch_size]
+            batch_targets = targets[start : start + batch_size]
 
-        encoded = tokenizer(
-            batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_input_length,
-        )
-        encoded = {k: v.to(device) for k, v in encoded.items()}
+            encoded = tokenizer(
+                batch_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_input_length,
+            )
+            encoded = {k: v.to(device) for k, v in encoded.items()}
 
-        outputs = model.generate(
-            **encoded,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
+            outputs = model.generate(
+                **encoded,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
 
-        prompt_lengths = encoded["attention_mask"].sum(dim=1).tolist()
-        for i, target in enumerate(batch_targets):
-            continuation_ids = outputs[i, int(prompt_lengths[i]) :]
-            prediction = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
-            ref = str(target).strip()
+            prompt_lengths = encoded["attention_mask"].sum(dim=1).tolist()
+            for i, target in enumerate(batch_targets):
+                continuation_ids = outputs[i, int(prompt_lengths[i]) :]
+                prediction = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
+                ref = str(target).strip()
 
-            exact_scores.append(_exact_match(prediction, ref))
-            rouge_scores.append(_rouge_l_f1(prediction, ref))
+                exact_scores.append(_exact_match(prediction, ref))
+                rouge_scores.append(_rouge_l_f1(prediction, ref))
 
     exact_match = _mean(exact_scores) or 0.0
     rouge_l = _mean(rouge_scores) or 0.0
@@ -402,89 +423,102 @@ def evaluate_general_tasks(
 ) -> Dict[str, Any]:
     eval_task_keys = eval_task_keys or CORE_EVAL_TASKS
     lm_eval, _ = _import_lm_eval_modules()
-    lm = _build_hflm(model=model, tokenizer=tokenizer, device=device, dtype=dtype)
+    with _left_padding_for_generation(tokenizer):
+        lm = _build_hflm(model=model, tokenizer=tokenizer, device=device, dtype=dtype)
 
-    lm_eval_keys = [k for k in eval_task_keys if k != "alpaca"]
-    has_alpaca = "alpaca" in eval_task_keys
+        lm_eval_keys = [k for k in eval_task_keys if k != "alpaca"]
+        has_alpaca = "alpaca" in eval_task_keys
 
-    lm_eval_task_names = [GENERAL_EVAL_TASKS[k]["lm_eval_name"] for k in lm_eval_keys]
-    resolved_tasks, skipped_tasks = _resolve_general_eval_tasks(lm_eval_task_names)
+        lm_eval_task_names = [GENERAL_EVAL_TASKS[k]["lm_eval_name"] for k in lm_eval_keys]
+        resolved_tasks, skipped_tasks = _resolve_general_eval_tasks(lm_eval_task_names)
 
-    gp_scores: Dict[str, float | None] = {}
-    ip_scores: Dict[str, float | None] = {}
-    gp_results: Dict[str, Any] = {}
-    ip_results: Dict[str, Any] = {}
-    ip_fewshot_used: Dict[str, int] = {}
+        gp_scores: Dict[str, float | None] = {}
+        ip_scores: Dict[str, float | None] = {}
+        gp_results: Dict[str, Any] = {}
+        ip_results: Dict[str, Any] = {}
+        ip_fewshot_used: Dict[str, int] = {}
 
-    if skipped_tasks:
-        warnings.warn(
-            "Skipping unavailable lm-eval tasks: " + ", ".join(skipped_tasks),
-            stacklevel=2,
-        )
+        if skipped_tasks:
+            warnings.warn(
+                "Skipping unavailable lm-eval tasks: " + ", ".join(skipped_tasks),
+                stacklevel=2,
+            )
 
-    if resolved_tasks:
-        for resolved_task in resolved_tasks:
-            gp_task_results, _ = _safe_simple_evaluate_single_task(
+        if resolved_tasks:
+            gp_results, _ = _safe_simple_evaluate_group(
                 lm_eval=lm_eval,
                 lm=lm,
-                task_name=resolved_task,
+                tasks=resolved_tasks,
                 num_fewshot=0,
                 batch_size=batch_size,
             )
-            ip_fewshot = _ip_fewshot_for_task(resolved_task)
-            ip_task_results, used = _safe_simple_evaluate_single_task(
+
+            bbh_ip_tasks = [
+                t for t in resolved_tasks if "bbh" in t and "object_counting" in t
+            ]
+            non_bbh_ip_tasks = [t for t in resolved_tasks if t not in bbh_ip_tasks]
+
+            ip_results_non_bbh, ip_used_non_bbh = _safe_simple_evaluate_group(
                 lm_eval=lm_eval,
                 lm=lm,
-                task_name=resolved_task,
-                num_fewshot=ip_fewshot,
+                tasks=non_bbh_ip_tasks,
+                num_fewshot=5,
                 batch_size=batch_size,
             )
-            gp_results.update(gp_task_results)
-            ip_results.update(ip_task_results)
-            ip_fewshot_used[resolved_task] = used
-
-        for key in lm_eval_keys:
-            configured = GENERAL_EVAL_TASKS[key]["lm_eval_name"]
-            candidates = LM_EVAL_TASK_ALIASES.get(configured, [configured])
-            resolved_name = next((name for name in candidates if name in gp_results), None)
-            gp_scores[key] = (
-                _extract_primary_metric(gp_results[resolved_name]) if resolved_name else None
+            ip_results_bbh, ip_used_bbh = _safe_simple_evaluate_group(
+                lm_eval=lm_eval,
+                lm=lm,
+                tasks=bbh_ip_tasks,
+                num_fewshot=3,
+                batch_size=batch_size,
             )
-            ip_scores[key] = (
-                _extract_primary_metric(ip_results[resolved_name]) if resolved_name else None
+            ip_results.update(ip_results_non_bbh)
+            ip_results.update(ip_results_bbh)
+            ip_fewshot_used.update(ip_used_non_bbh)
+            ip_fewshot_used.update(ip_used_bbh)
+
+            for key in lm_eval_keys:
+                configured = GENERAL_EVAL_TASKS[key]["lm_eval_name"]
+                candidates = LM_EVAL_TASK_ALIASES.get(configured, [configured])
+                resolved_name = next((name for name in candidates if name in gp_results), None)
+                gp_scores[key] = (
+                    _extract_primary_metric(gp_results[resolved_name]) if resolved_name else None
+                )
+                ip_scores[key] = (
+                    _extract_primary_metric(ip_results[resolved_name]) if resolved_name else None
+                )
+
+        if has_alpaca:
+            gp_scores["alpaca"] = _evaluate_alpaca_rouge_l(
+                model=model,
+                tokenizer=tokenizer,
+                num_fewshot=0,
+                n_samples=alpaca_n_samples,
+                batch_size=batch_size,
+                max_new_tokens=alpaca_max_new_tokens,
+            )
+            ip_scores["alpaca"] = _evaluate_alpaca_rouge_l(
+                model=model,
+                tokenizer=tokenizer,
+                num_fewshot=5,
+                n_samples=alpaca_n_samples,
+                batch_size=batch_size,
+                max_new_tokens=alpaca_max_new_tokens,
             )
 
-    if has_alpaca:
-        gp_scores["alpaca"] = _evaluate_alpaca_rouge_l(
-            model=model,
-            tokenizer=tokenizer,
-            num_fewshot=0,
-            n_samples=alpaca_n_samples,
-            batch_size=batch_size,
-            max_new_tokens=alpaca_max_new_tokens,
-        )
-        ip_scores["alpaca"] = _evaluate_alpaca_rouge_l(
-            model=model,
-            tokenizer=tokenizer,
-            num_fewshot=5,
-            n_samples=alpaca_n_samples,
-            batch_size=batch_size,
-            max_new_tokens=alpaca_max_new_tokens,
-        )
-
-    return {
-        "gp": gp_scores,
-        "ip": ip_scores,
-        "gp_mean": _mean(v for v in gp_scores.values() if v is not None),
-        "ip_mean": _mean(v for v in ip_scores.values() if v is not None),
-        "resolved_tasks": resolved_tasks,
-        "skipped_tasks": skipped_tasks,
-        "ip_fewshot_used": ip_fewshot_used,
-        "raw": {
-            "gp": gp_results,
-            "ip": ip_results,
-        },
-    }
+        return {
+            "gp": gp_scores,
+            "ip": ip_scores,
+            "gp_mean": _mean(v for v in gp_scores.values() if v is not None),
+            "ip_mean": _mean(v for v in ip_scores.values() if v is not None),
+            "resolved_tasks": resolved_tasks,
+            "skipped_tasks": skipped_tasks,
+            "ip_fewshot_used": ip_fewshot_used,
+            "raw": {
+                "gp": gp_results,
+                "ip": ip_results,
+            },
+        }
 
 
 def evaluate_seen_tasks(
