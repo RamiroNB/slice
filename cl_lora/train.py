@@ -1,24 +1,34 @@
-import os
-import inspect
-import functools
-from dotenv import load_dotenv
+from __future__ import annotations
 
-import torch
+import argparse
+import functools
+import inspect
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, Tuple
+
 import accelerate
+import torch
+from dotenv import load_dotenv
+from peft import get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
+    DataCollatorForLanguageModeling,
     Trainer,
-    DataCollatorForLanguageModeling
+    TrainingArguments,
 )
 
-from peft import get_peft_model
-from lora_config import build_lora_config
-from load_dataset import load_training_dataset
+try:
+    from .load_dataset import load_training_dataset
+    from .lora_config import build_lora_config
+except ImportError:
+    from load_dataset import load_training_dataset
+    from lora_config import build_lora_config
 
 
-def _patch_accelerate_unwrap_model_compat():
+def _patch_accelerate_unwrap_model_compat() -> None:
     """Make older accelerate versions ignore keep_torch_compile from newer transformers."""
     unwrap = accelerate.Accelerator.unwrap_model
     params = inspect.signature(unwrap).parameters
@@ -40,97 +50,151 @@ MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 HF_TOKEN = os.getenv("HUGGING_TOKEN")
 
 
-def main():
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
-    tokenizer.pad_token = tokenizer.eos_token
+def build_tokenizer(model_name: str = MODEL_NAME, hf_token: str | None = HF_TOKEN):
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
+    return tokenizer
 
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        # torch_dtype=torch.float16,
-        torch_dtype=torch.bfloat16,
-        device_map="auto", 
-        token=HF_TOKEN
+
+def load_base_model(
+    model_name: str = MODEL_NAME,
+    hf_token: str | None = HF_TOKEN,
+    torch_dtype: torch.dtype = torch.bfloat16,
+    device_map: str = "auto",
+):
+    return AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        device_map=device_map,
+        token=hf_token,
     )
 
-    # Apply LoRA
-    lora_config = build_lora_config()
-    model = get_peft_model(model, lora_config)
 
-    model.print_trainable_parameters()
-
-    train_dataset, eval_dataset = load_training_dataset()
-
-    def tokenize(example):
-        text = example["text"]
-        return tokenizer(
-            text,
-            truncation=True,
-            # padding="max_length",
-            max_length=256
-        )
-
-    train_dataset = train_dataset.map(
-        tokenize,
-        remove_columns=train_dataset.column_names
-    )
-    eval_dataset = eval_dataset.map(
-        tokenize,
-        remove_columns=eval_dataset.column_names
+def _tokenize_dataset(dataset, tokenizer, max_length: int):
+    return dataset.map(
+        lambda ex: tokenizer(ex["text"], truncation=True, max_length=max_length),
+        remove_columns=dataset.column_names,
     )
 
-    # training_args = TrainingArguments(
-    #     output_dir="./outputs",
-    #     per_device_train_batch_size=4,
-    #     per_device_eval_batch_size=4,
-    #      gradient_accumulation_steps=2,
-    #     # learning_rate=2e-4,
-    #      learning_rate=1e-4,
-    #     num_train_epochs=3,
-    #     logging_steps=50,
-    #     save_steps=500,
-    #     eval_strategy="steps",
-    #     eval_steps=500,
-    #     # fp16=True,
-    #      bf16=True,
-    #     report_to="none",
-    #     dataset_text_field="text",
-    #     max_seq_length=512,
-    # )
+
+def train_on_task(
+    model,
+    tokenizer,
+    task,
+    output_dir: str,
+    learning_rate: float = 1e-4,
+    num_train_epochs: float = 3.0,
+    per_device_train_batch_size: int = 8,
+    per_device_eval_batch_size: int = 8,
+    gradient_accumulation_steps: int = 2,
+    logging_steps: int = 50,
+    save_steps: int = 500,
+    eval_steps: int = 500,
+    max_seq_length: int = 256,
+    eval_size: int = 200,
+    seed: int = 42,
+    use_bf16: bool = True,
+    save_adapter: bool = True,
+) -> Tuple[Any, Dict[str, Any]]:
+    """Train a fresh LoRA adapter on one task, then merge it into the model.
+
+    Returns:
+        (merged_model, training_report)
+    """
+    train_dataset, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
+    train_dataset = _tokenize_dataset(train_dataset, tokenizer=tokenizer, max_length=max_seq_length)
+    eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
+
+    lora_model = get_peft_model(model, build_lora_config())
+    lora_model.print_trainable_parameters()
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
     training_args = TrainingArguments(
-    output_dir="./outputs",
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
-    gradient_accumulation_steps=2,
-    learning_rate=1e-4,
-    num_train_epochs=3,
-    logging_steps=50,
-    save_steps=500,
-    save_total_limit=2,
-    eval_strategy="steps",
-    eval_steps=500,
-    bf16=True,
-    report_to="none",
-    remove_unused_columns=True,
-)
-
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False
+        output_dir=str(output_path),
+        per_device_train_batch_size=per_device_train_batch_size,
+        per_device_eval_batch_size=per_device_eval_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        learning_rate=learning_rate,
+        num_train_epochs=num_train_epochs,
+        logging_steps=logging_steps,
+        save_steps=save_steps,
+        save_total_limit=2,
+        eval_strategy="steps",
+        eval_steps=eval_steps,
+        bf16=use_bf16,
+        report_to="none",
+        remove_unused_columns=True,
+        seed=seed,
     )
 
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     trainer = Trainer(
-        model=model,
+        model=lora_model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=data_collator
+        data_collator=data_collator,
     )
 
-    trainer.train()
+    train_result = trainer.train()
+    eval_metrics = trainer.evaluate()
 
-    model.save_pretrained("/mnt/C-SSD/ramiro/adapters/llama-3.2-3b-instruct-lora")
+    if save_adapter:
+        lora_model.save_pretrained(str(output_path / "adapter"))
+
+    merge_fn = getattr(lora_model, "merge_and_unload", None)
+    merged_model = merge_fn() if callable(merge_fn) else lora_model
+    trainer.save_state()
+
+    report = {
+        "task_name": getattr(task, "name", str(task)),
+        "train_metrics": train_result.metrics,
+        "eval_metrics": eval_metrics,
+        "output_dir": str(output_path),
+    }
+    with open(output_path / "training_report.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    del trainer
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return merged_model, report
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train LoRA on one task and merge into base model.")
+    parser.add_argument(
+        "--task",
+        default="task363_sst2_polarity_classification",
+        help="Task name (e.g., task363_sst2_polarity_classification or NI363).",
+    )
+    parser.add_argument("--model-name", default=MODEL_NAME)
+    parser.add_argument("--output-dir", default="outputs/single_task")
+    parser.add_argument("--save-merged-model", action="store_true")
+    args = parser.parse_args()
+
+    tokenizer = build_tokenizer(model_name=args.model_name, hf_token=HF_TOKEN)
+    model = load_base_model(model_name=args.model_name, hf_token=HF_TOKEN)
+
+    merged_model, report = train_on_task(
+        model=model,
+        tokenizer=tokenizer,
+        task=args.task,
+        output_dir=args.output_dir,
+    )
+
+    if args.save_merged_model:
+        merged_dir = Path(args.output_dir) / "merged_model"
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        merged_model.save_pretrained(str(merged_dir))
+        tokenizer.save_pretrained(str(merged_dir))
+
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

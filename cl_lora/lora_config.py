@@ -1,10 +1,10 @@
 from peft import LoraConfig, TaskType
 
-def build_lora_config():
+def build_lora_config(r: int = 8, lora_alpha: int = 16, lora_dropout: float = 0.1):
     config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.1,
+        r=r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
         use_rslora=True,
         target_modules=[
             "q_proj",
