@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any, Tuple, Union
 
 import requests
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 
 try:
     from .task_sequences import SuperNITask, TraceTask, all_superni_tasks
@@ -16,6 +18,28 @@ except ImportError:
 SUPERNI_RAW_TEMPLATE = (
     "https://raw.githubusercontent.com/allenai/natural-instructions/master/tasks/{task_name}.json"
 )
+
+TRACE_RAW_TEMPLATE = (
+    "https://raw.githubusercontent.com/BeyonderXX/TRACE/master/data/{task_folder}/{split}.json"
+)
+
+TRACE_FOLDER_MAP = {
+    "C-STANCE": "C-STANCE",
+    "FOMC": "FOMC",
+    "MeetingBank": "MeetingBank",
+    "Py150": "Py150",
+    "ScienceQA": "ScienceQA",
+    "NumGLUE-cm": "NumGLUE-cm",
+}
+
+TRACE_BENCHMARK_DIRS = [
+    "LLM-CL-Benchmark_1000",
+    "LLM-CL-Benchmark_500",
+    "LLM-CL-Benchmark_5000",
+    "LLM-CL-Benchmark_Reasoning",
+]
+
+DEFAULT_TRACE_ROOT = "/mnt/C-SSD/ramiro/data/TRACE-Benchmark"
 
 
 def _to_text(value: Any) -> str:
@@ -124,34 +148,75 @@ def _format_trace_instance(example: dict, task_name: str) -> dict:
     }
 
 
-def _load_trace_hf_dataset(task_name: str, hf_dataset: str | None) -> Dataset:
-    candidates = []
-    if hf_dataset:
-        candidates.append((hf_dataset, None))
-    candidates.extend(
-        [
-            ("BeyonderXX/TRACE", task_name),
-            ("BeyonderXX/TRACE", task_name.lower()),
-        ]
-    )
+def _load_trace_local(task_name: str, split: str = "train") -> Dataset | None:
+    folder = TRACE_FOLDER_MAP.get(task_name)
+    if folder is None:
+        raise ValueError(
+            f"Unknown TRACE task '{task_name}'. "
+            f"Known tasks: {list(TRACE_FOLDER_MAP.keys())}"
+        )
 
-    last_error = None
-    for path, config in candidates:
-        try:
-            ds = load_dataset(path, name=config)
-            if isinstance(ds, Dataset):
-                return ds
-            if "train" in ds:
-                return ds["train"]
-            first_split = next(iter(ds.keys()))
-            return ds[first_split]
-        except Exception as exc:  # noqa: BLE001 - keep trying candidates
-            last_error = exc
+    env_candidates = [
+        os.getenv("TRACE_DATA_DIR"),
+        os.getenv("TRACE_DATA_ROOT"),
+    ]
+    root_candidates = [
+        Path(p) for p in env_candidates if p
+    ] + [
+        Path(DEFAULT_TRACE_ROOT),
+    ]
 
-    raise RuntimeError(
-        "Unable to load TRACE dataset from known HuggingFace candidates for "
-        f"task '{task_name}'."
-    ) from last_error
+    split_filename = f"{split}.json"
+    file_candidates: list[Path] = []
+    for root in root_candidates:
+        if not root.exists():
+            continue
+
+        # Candidate already points to a benchmark directory.
+        file_candidates.append(root / folder / split_filename)
+
+        # Candidate points to TRACE root containing benchmark subdirectories.
+        for bench_dir in TRACE_BENCHMARK_DIRS:
+            file_candidates.append(root / bench_dir / folder / split_filename)
+
+    for file_path in file_candidates:
+        if file_path.exists():
+            with open(file_path, "r", encoding="utf-8") as f:
+                records = json.load(f)
+            if not isinstance(records, list):
+                raise ValueError(
+                    f"Unexpected TRACE JSON format from {file_path}; expected a list of records."
+                )
+            return Dataset.from_list(records)
+
+    return None
+
+
+def _load_trace_raw(task_name: str, split: str = "train") -> Dataset:
+    folder = TRACE_FOLDER_MAP.get(task_name)
+    if folder is None:
+        raise ValueError(
+            f"Unknown TRACE task '{task_name}'. "
+            f"Known tasks: {list(TRACE_FOLDER_MAP.keys())}"
+        )
+
+    url = TRACE_RAW_TEMPLATE.format(task_folder=folder, split=split)
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            raise RuntimeError(
+                f"TRACE file not found at {url}. If TRACE raw data files are not committed "
+                "to GitHub for this split, clone TRACE data locally and load from local files."
+            ) from exc
+        raise
+
+    records = response.json()
+    if not isinstance(records, list):
+        raise ValueError(f"Unexpected TRACE JSON format from {url}; expected a list of records.")
+
+    return Dataset.from_list(records)
 
 
 def load_superni_training_dataset(
@@ -195,7 +260,12 @@ def load_trace_training_dataset(
     eval_size: int = 200,
     seed: int = 42,
 ) -> Tuple[Dataset, Dataset]:
-    dataset = _load_trace_hf_dataset(task_name=task_name, hf_dataset=hf_dataset)
+    # hf_dataset kept for compatibility but TRACE now loads from local TRACE benchmarks
+    # first, then falls back to raw GitHub if needed.
+    _ = hf_dataset
+    dataset = _load_trace_local(task_name=task_name, split="train")
+    if dataset is None:
+        dataset = _load_trace_raw(task_name=task_name, split="train")
     train_raw, eval_raw = _split_dataset(dataset=dataset, eval_size=eval_size, seed=seed)
 
     train_dataset = train_raw.map(
@@ -220,10 +290,10 @@ def load_training_dataset(
         task: SuperNI task name/NI id, SuperNITask dataclass, TRACE task name,
             or TraceTask dataclass.
     """
-    if hasattr(task, "ni_id"):
+    if isinstance(task, SuperNITask):
         return load_superni_training_dataset(task.name, eval_size=eval_size, seed=seed)
 
-    if hasattr(task, "language") and hasattr(task, "metric"):
+    if isinstance(task, TraceTask):
         return load_trace_training_dataset(
             task_name=task.name,
             hf_dataset=getattr(task, "hf_dataset", None),

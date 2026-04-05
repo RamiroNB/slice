@@ -403,31 +403,31 @@ SEQUENCES = {
         description="Mixed sequence 2: Sentiment140 → Mutual → StoryCommonsense → SyntheticExec → CosmosQA",
     ),
     "NI-Seq-Dummy": Sequence(
-	name="NI-Seq-Dummy",
-	task_type="mixed",
-	tasks=[NI363, NI618],
-	description="Dev-only 2-task sequence: SST2 -> Amazon review summary",
-)
+        name="NI-Seq-Dummy",
+        task_type="mixed",
+        tasks=[NI363, NI618],
+        description="Dev-only 2-task sequence: SST2 -> Amazon review summary",
+    ),
+    "TRACE-Dummy": Sequence(
+        name="TRACE-Dummy",
+        task_type="mixed",
+        tasks=[TRACE_FOMC, TRACE_MEETINGBANK],
+        description="Dev-only 2-task TRACE sequence: FOMC -> MeetingBank",
+    ),
 }
 
-# TRACE_SEQUENCE = Sequence(
-#     name="TRACE",
-#     task_type="mixed",
-#     tasks=[
-#         TRACE_CSTANCE,
-#         TRACE_FOMC,
-#         TRACE_MEETINGBANK,
-#         TRACE_PY150,
-#         TRACE_SCIENCEQA,
-#         TRACE_NUMGLUE,
-#     ],
-#     description="TRACE benchmark: C-STANCE → FOMC → MeetingBank → Py150 → ScienceQA → NumGLUE-cm",
-# )
 TRACE_SEQUENCE = Sequence(
-	name="NI-Seq-Dummy",
-	task_type="mixed",
-	tasks=[NI363, NI618],
-	description="Dev-only 2-task sequence: SST2 -> Amazon review summary",
+    name="TRACE",
+    task_type="mixed",
+    tasks=[
+        TRACE_CSTANCE,
+        TRACE_FOMC,
+        TRACE_MEETINGBANK,
+        TRACE_PY150,
+        TRACE_SCIENCEQA,
+        TRACE_NUMGLUE,
+    ],
+    description="TRACE benchmark: C-STANCE → FOMC → MeetingBank → Py150 → ScienceQA → NumGLUE-cm",
 )
 
 # ---------------------------------------------------------------------------
