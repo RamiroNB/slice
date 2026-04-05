@@ -14,4 +14,4 @@ datasets
 peft
 requests
 # lm-eval add from github egg
-# git+https://github.com/EleutherAI/lm-evaluation-harness.git#egg=lm-eval
+git+https://github.com/EleutherAI/lm-evaluation-harness.git#egg=lm-eval
