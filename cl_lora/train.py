@@ -23,9 +23,11 @@ from transformers import (
 try:
     from .load_dataset import load_training_dataset
     from .lora_config import build_lora_config
+    from .slice import SliceInitConfig, initialize_lora_with_slice
 except ImportError:
     from load_dataset import load_training_dataset
     from lora_config import build_lora_config
+    from slice import SliceInitConfig, initialize_lora_with_slice
 
 
 def _patch_accelerate_unwrap_model_compat() -> None:
@@ -84,6 +86,7 @@ def train_on_task(
     tokenizer,
     task,
     output_dir: str,
+    retain_task=None,
     learning_rate: float = 1e-4,
     num_train_epochs: float = 3.0,
     per_device_train_batch_size: int = 8,
@@ -97,6 +100,11 @@ def train_on_task(
     seed: int = 42,
     use_bf16: bool = True,
     save_adapter: bool = True,
+    slice_enabled: bool = False,
+    slice_cache_dir: str = "slice_cache",
+    slice_max_steps: int = 100,
+    slice_retain_scale: float = 1.0,
+    slice_rank: int | None = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train a fresh LoRA adapter on one task, then merge it into the model.
 
@@ -109,6 +117,24 @@ def train_on_task(
 
     lora_model = get_peft_model(model, build_lora_config())
     lora_model.print_trainable_parameters()
+
+    if slice_enabled:
+        slice_config = SliceInitConfig(
+            cache_dir=slice_cache_dir,
+            max_steps=slice_max_steps,
+            per_device_batch_size=per_device_train_batch_size,
+            seed=seed,
+            retain_scale=slice_retain_scale,
+            rank=slice_rank,
+            max_seq_length=max_seq_length,
+        )
+        initialize_lora_with_slice(
+            model=lora_model,
+            tokenizer=tokenizer,
+            forget_task=task,
+            retain_task=retain_task,
+            config=slice_config,
+        )
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -132,6 +158,7 @@ def train_on_task(
     )
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
     trainer = Trainer(
         model=lora_model,
         args=training_args,
@@ -173,9 +200,15 @@ def main() -> None:
         default="task363_sst2_polarity_classification",
         help="Task name (e.g., task363_sst2_polarity_classification or NI363).",
     )
+    parser.add_argument("--retain-task", default=None, help="Optional retain task for slice init.")
     parser.add_argument("--model-name", default=MODEL_NAME)
     parser.add_argument("--output-dir", default="outputs/single_task")
     parser.add_argument("--save-merged-model", action="store_true")
+    parser.add_argument("--slice-init", action="store_true", help="Enable slice LoRA init.")
+    parser.add_argument("--slice-cache-dir", default="slice_cache")
+    parser.add_argument("--slice-max-steps", type=int, default=100)
+    parser.add_argument("--slice-retain-scale", type=float, default=1.0)
+    parser.add_argument("--slice-rank", type=int, default=None)
     args = parser.parse_args()
 
     tokenizer = build_tokenizer(model_name=args.model_name, hf_token=HF_TOKEN)
@@ -186,6 +219,12 @@ def main() -> None:
         tokenizer=tokenizer,
         task=args.task,
         output_dir=args.output_dir,
+        retain_task=args.retain_task,
+        slice_enabled=args.slice_init,
+        slice_cache_dir=args.slice_cache_dir,
+        slice_max_steps=args.slice_max_steps,
+        slice_retain_scale=args.slice_retain_scale,
+        slice_rank=args.slice_rank,
     )
 
     if args.save_merged_model:

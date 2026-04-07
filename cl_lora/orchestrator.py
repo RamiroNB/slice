@@ -55,6 +55,11 @@ def run_sequence(
     task_eval_max_new_tokens: int,
     save_final_model: bool,
     resume: bool,
+    slice_enabled: bool,
+    slice_cache_dir: str,
+    slice_max_steps: int,
+    slice_retain_scale: float,
+    slice_rank: int | None,
 ) -> Dict[str, Any]:
     sequence = get_sequence(sequence_name)
     task_order = [task.name for task in sequence.tasks]
@@ -125,12 +130,20 @@ def run_sequence(
         stage_eval_dir = run_output_dir / "stages" / f"stage_{idx:02d}_{safe_task_name}"
 
         print(f"\n=== Stage {idx}/{len(sequence.tasks)} | Training task: {task_name} ===")
+        retain_task = sequence.tasks[idx - 2] if idx > 1 else None
+
         model, train_report = train_on_task(
             model=model,
             tokenizer=tokenizer,
             task=task,
             output_dir=str(stage_train_dir),
             eval_size=eval_size,
+            retain_task=retain_task,
+            slice_enabled=slice_enabled,
+            slice_cache_dir=slice_cache_dir,
+            slice_max_steps=slice_max_steps,
+            slice_retain_scale=slice_retain_scale,
+            slice_rank=slice_rank,
         )
 
         seen_tasks.append(task)
@@ -211,6 +224,11 @@ def main() -> None:
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--save-final-model", action="store_true")
+    parser.add_argument("--slice-init", action="store_true", help="Enable slice LoRA init.")
+    parser.add_argument("--slice-cache-dir", default="slice_cache")
+    parser.add_argument("--slice-max-steps", type=int, default=100)
+    parser.add_argument("--slice-retain-scale", type=float, default=1.0)
+    parser.add_argument("--slice-rank", type=int, default=None)
     args = parser.parse_args()
 
     general_eval_keys = (
@@ -236,6 +254,11 @@ def main() -> None:
         task_eval_max_new_tokens=args.task_eval_max_new_tokens,
         save_final_model=args.save_final_model,
         resume=args.resume,
+        slice_enabled=args.slice_init,
+        slice_cache_dir=args.slice_cache_dir,
+        slice_max_steps=args.slice_max_steps,
+        slice_retain_scale=args.slice_retain_scale,
+        slice_rank=args.slice_rank,
     )
 
     print("\n=== Final Metrics ===")
