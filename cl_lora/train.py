@@ -105,6 +105,9 @@ def train_on_task(
     slice_cache_dir: str = "slice_cache",
     slice_max_steps: int = 100,
     slice_retain_scale: float = 1.0,
+    slice_grad_project: bool = False,
+    slice_grad_projection_mode: str = "per_module",
+    slice_add_retain_grad: bool = False,
     slice_rank: int | None = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train a fresh LoRA adapter on one task, then merge it into the model.
@@ -127,6 +130,9 @@ def train_on_task(
             per_device_batch_size=per_device_train_batch_size,
             seed=seed,
             retain_scale=slice_retain_scale,
+            grad_project=slice_grad_project,
+            grad_projection_mode=slice_grad_projection_mode,
+            add_retain_grad=slice_add_retain_grad,
             rank=slice_rank,
             max_seq_length=max_seq_length,
         )
@@ -219,6 +225,18 @@ def main() -> None:
     parser.add_argument("--slice-cache-dir", default="slice_cache")
     parser.add_argument("--slice-max-steps", type=int, default=100)
     parser.add_argument("--slice-retain-scale", type=float, default=1.0)
+    parser.add_argument("--slice-grad-project", action="store_true", help="Project forget gradients against retain gradients for slice init.")
+    parser.add_argument(
+        "--slice-grad-projection-mode",
+        choices=["per_module", "global"],
+        default="per_module",
+        help="Projection mode when --slice-grad-project is enabled.",
+    )
+    parser.add_argument(
+        "--slice-add-retain-grad",
+        action="store_true",
+        help="Add retain gradient after projection when --slice-grad-project is enabled.",
+    )
     parser.add_argument("--slice-rank", type=int, default=None)
     args = parser.parse_args()
 
@@ -235,6 +253,9 @@ def main() -> None:
         slice_cache_dir=args.slice_cache_dir,
         slice_max_steps=args.slice_max_steps,
         slice_retain_scale=args.slice_retain_scale,
+        slice_grad_project=args.slice_grad_project,
+        slice_grad_projection_mode=args.slice_grad_projection_mode,
+        slice_add_retain_grad=args.slice_add_retain_grad,
         slice_rank=args.slice_rank,
     )
 

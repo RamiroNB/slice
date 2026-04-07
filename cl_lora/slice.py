@@ -25,6 +25,9 @@ class SliceInitConfig:
     per_device_batch_size: int = 4
     seed: int = 42
     retain_scale: float = 1.0
+    grad_project: bool = False
+    grad_projection_mode: str = "per_module"
+    add_retain_grad: bool = False
     rank: Optional[int] = None
     max_seq_length: int = 256
 
@@ -137,6 +140,75 @@ def _combine_grads(
     return combined
 
 
+def _project_forget_gradients(
+    grads_forget: Dict[str, torch.Tensor],
+    grads_retain: Dict[str, torch.Tensor],
+    *,
+    global_projection: bool = False,
+    add_retain_grad: bool = False,
+) -> Dict[str, torch.Tensor]:
+    """Project forget gradients against retain gradients (LInMU-style)."""
+    projected: Dict[str, torch.Tensor] = {}
+    eps = 1e-12
+
+    if not grads_forget:
+        return projected
+
+    if not global_projection:
+        for name, g_f in grads_forget.items():
+            g_r = grads_retain.get(name)
+            if g_r is None:
+                projected[name] = g_f
+                continue
+
+            original_shape = g_f.shape
+            g_f_flat = g_f.float().view(-1).to(torch.float64)
+            g_r_flat = g_r.float().view(-1).to(torch.float64)
+
+            dot = torch.dot(g_f_flat, g_r_flat)
+            denom = torch.dot(g_r_flat, g_r_flat)
+            dot_clipped = torch.relu(-dot)
+            gamma = dot_clipped / (denom + eps)
+
+            g_f_new = (g_f_flat + gamma * g_r_flat).view(original_shape)
+            if add_retain_grad:
+                g_f_new = g_f_new + g_r.to(g_f_new.device)
+            projected[name] = g_f_new.to(g_f.dtype)
+    else:
+        first_name = next(iter(grads_forget.keys()))
+        device = grads_forget[first_name].device
+        global_dot = torch.tensor(0.0, device=device)
+        global_denom = torch.tensor(0.0, device=device)
+
+        for name, g_f in grads_forget.items():
+            g_r = grads_retain.get(name)
+            if g_r is None:
+                continue
+            g_f_flat = g_f.float().view(-1).to(torch.float64)
+            g_r_flat = g_r.float().view(-1).to(torch.float64)
+            global_dot = global_dot + torch.dot(g_f_flat, g_r_flat)
+            global_denom = global_denom + torch.dot(g_r_flat, g_r_flat)
+
+        dot_clipped = torch.relu(-global_dot)
+        gamma = dot_clipped / (global_denom + eps)
+
+        for name, g_f in grads_forget.items():
+            g_r = grads_retain.get(name)
+            if g_r is None:
+                projected[name] = g_f
+                continue
+
+            original_shape = g_f.shape
+            g_f_flat = g_f.float().view(-1).to(torch.float64)
+            g_r_flat = g_r.float().view(-1).to(torch.float64)
+            g_f_new = (g_f_flat + gamma * g_r_flat).view(original_shape)
+            if add_retain_grad:
+                g_f_new = g_f_new + g_r.to(g_f_new.device)
+            projected[name] = g_f_new.to(g_f.dtype)
+
+    return projected
+
+
 def compute_slice_inits(
     model: torch.nn.Module,
     tokenizer,
@@ -217,8 +289,26 @@ def compute_slice_inits(
         denom_r = max(1, steps_r)
         grads_r = {k: v / float(denom_r) for k, v in grads_r.items()}
 
-    combined = _combine_grads(grads_f, grads_r, config.retain_scale)
-    logger.info("Built combined gradient matrix for %d modules (retain_scale=%s)", len(combined), config.retain_scale)
+    if config.grad_project and grads_r is not None:
+        global_projection = str(config.grad_projection_mode).lower() == "global"
+        logger.info(
+            "Projecting slice gradients (mode=%s, add_retain_grad=%s)",
+            "global" if global_projection else "per_module",
+            config.add_retain_grad,
+        )
+        combined = _project_forget_gradients(
+            grads_forget=grads_f,
+            grads_retain=grads_r,
+            global_projection=global_projection,
+            add_retain_grad=config.add_retain_grad,
+        )
+        logger.info("Built projected gradient matrix for %d modules", len(combined))
+    elif config.grad_project and grads_r is None:
+        logger.info("grad_project=True but no retain task provided; using forget gradients without projection")
+        combined = grads_f
+    else:
+        combined = _combine_grads(grads_f, grads_r, config.retain_scale)
+        logger.info("Built combined gradient matrix for %d modules (retain_scale=%s)", len(combined), config.retain_scale)
 
     r_use = config.rank or int(getattr(lora_cfg, "r", 8))
     inits = {}
@@ -245,6 +335,9 @@ def load_or_compute_slice_inits(
         "max_steps": config.max_steps,
         "batch_size": config.per_device_batch_size,
         "retain_scale": config.retain_scale,
+        "grad_project": config.grad_project,
+        "grad_projection_mode": config.grad_projection_mode,
+        "add_retain_grad": config.add_retain_grad,
     }
     cache_key = make_cache_key(payload)
     cached = load_slice_cache(config.cache_dir, cache_key, device=_model_device(model))

@@ -80,6 +80,46 @@ Resume an interrupted run:
 	  --output-dir outputs/single_task_demo \
 	  --save-merged-model
 
+## Slice LoRA Initialization
+
+The slice initializer performs a backward pass over the current task data
+and (optionally) the previous task to seed LoRA A/B matrices. It reuses the
+same collator used in training and caches initializations per task pair.
+
+Example (continual run with slice-no-proj init enabled):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -m cl_lora.orchestrator \
+	--sequence NI-Seq-Dummy \
+	--general-eval-set core \
+	--eval-size 10 \
+	--task-eval-samples 5 \
+	--task-eval-max-new-tokens 32 \
+	--run-name dummy_slice_dev01 \
+	--slice-init \
+	--slice-cache-dir slice_cache \
+	--slice-max-steps 64 \
+	--slice-retain-scale 1.0
+```
+Example (continual run with slice-projected init enabled):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -m cl_lora.orchestrator \
+	--sequence NI-Seq-Dummy \
+	--general-eval-set core \
+	--eval-size 10 \
+	--task-eval-samples 5 \
+	--task-eval-max-new-tokens 32 \
+	--run-name dummy_slice_dev01 \
+	--slice-init \
+	--slice-cache-dir slice_cache \
+	--slice-max-steps 64 \
+	--slice-rank 8 \
+	--slice-grad-project \
+	--slice-grad-projection-mode per_module \
+	--log-level DEBUG
+```
+
 ## Output Layout
 
 Training artifacts:

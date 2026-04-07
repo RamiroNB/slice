@@ -60,6 +60,9 @@ def run_sequence(
     slice_cache_dir: str,
     slice_max_steps: int,
     slice_retain_scale: float,
+    slice_grad_project: bool,
+    slice_grad_projection_mode: str,
+    slice_add_retain_grad: bool,
     slice_rank: int | None,
 ) -> Dict[str, Any]:
     sequence = get_sequence(sequence_name)
@@ -144,6 +147,9 @@ def run_sequence(
             slice_cache_dir=slice_cache_dir,
             slice_max_steps=slice_max_steps,
             slice_retain_scale=slice_retain_scale,
+            slice_grad_project=slice_grad_project,
+            slice_grad_projection_mode=slice_grad_projection_mode,
+            slice_add_retain_grad=slice_add_retain_grad,
             slice_rank=slice_rank,
         )
 
@@ -229,6 +235,18 @@ def main() -> None:
     parser.add_argument("--slice-cache-dir", default="slice_cache")
     parser.add_argument("--slice-max-steps", type=int, default=100)
     parser.add_argument("--slice-retain-scale", type=float, default=1.0)
+    parser.add_argument("--slice-grad-project", action="store_true", help="Project forget gradients against retain gradients for slice init.")
+    parser.add_argument(
+        "--slice-grad-projection-mode",
+        choices=["per_module", "global"],
+        default="per_module",
+        help="Projection mode when --slice-grad-project is enabled.",
+    )
+    parser.add_argument(
+        "--slice-add-retain-grad",
+        action="store_true",
+        help="Add retain gradient after projection when --slice-grad-project is enabled.",
+    )
     parser.add_argument("--slice-rank", type=int, default=None)
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
@@ -270,6 +288,9 @@ def main() -> None:
         slice_cache_dir=args.slice_cache_dir,
         slice_max_steps=args.slice_max_steps,
         slice_retain_scale=args.slice_retain_scale,
+        slice_grad_project=args.slice_grad_project,
+        slice_grad_projection_mode=args.slice_grad_projection_mode,
+        slice_add_retain_grad=args.slice_add_retain_grad,
         slice_rank=args.slice_rank,
     )
 
