@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
+import logging
+
+logger = logging.getLogger("cl_lora.slice_cache")
 
 
 @dataclass
@@ -42,6 +45,7 @@ def load_slice_cache(
 ) -> Optional[SliceCacheEntry]:
     root_dir = os.path.join(cache_dir, cache_key)
     if not os.path.isdir(root_dir):
+        logger.debug("Slice cache root missing: %s", root_dir)
         return None
 
     inits_dir = os.path.join(root_dir, "inits")
@@ -60,8 +64,10 @@ def load_slice_cache(
             inits[key] = {"A": payload["A"], "B": payload["B"]}
 
     if not inits:
+        logger.debug("Slice cache at %s contains no inits", root_dir)
         return None
 
+    logger.info("Loaded slice cache from %s with %d modules", root_dir, len(inits))
     return SliceCacheEntry(inits=inits)
 
 
@@ -83,3 +89,4 @@ def save_slice_cache(
         meta_path = os.path.join(root_dir, "meta.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, sort_keys=True, indent=2)
+    logger.info("Saved slice cache to %s with %d modules", root_dir, len(entry.inits))

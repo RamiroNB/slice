@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+import logging
 
 try:
     from .eval import evaluate_all
@@ -229,7 +230,18 @@ def main() -> None:
     parser.add_argument("--slice-max-steps", type=int, default=100)
     parser.add_argument("--slice-retain-scale", type=float, default=1.0)
     parser.add_argument("--slice-rank", type=int, default=None)
+    parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
+
+    # Configure logging so slice and cache logs are visible
+    try:
+        lvl = getattr(logging, args.log_level.upper(), logging.INFO)
+    except Exception:
+        lvl = logging.INFO
+    logging.basicConfig(level=lvl, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Reduce verbosity of very chatty third-party libraries by default
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+    logging.getLogger("peft").setLevel(logging.WARNING)
 
     general_eval_keys = (
         CORE_EVAL_TASKS if args.general_eval_set == "core" else list(GENERAL_EVAL_TASKS.keys())

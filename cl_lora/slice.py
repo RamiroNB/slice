@@ -6,6 +6,7 @@ from typing import Dict, Iterable, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 from transformers import DataCollatorForLanguageModeling
+import logging
 
 try:
     from .lora_config import build_lora_config
@@ -26,6 +27,9 @@ class SliceInitConfig:
     retain_scale: float = 1.0
     rank: Optional[int] = None
     max_seq_length: int = 256
+
+
+logger = logging.getLogger("cl_lora.slice")
 
 
 def _tokenize_dataset(dataset, tokenizer, max_length: int):
@@ -141,13 +145,23 @@ def compute_slice_inits(
     *,
     config: SliceInitConfig,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
+    logger.info(
+        "Starting slice init: forget=%s retain=%s max_steps=%s batch_size=%s",
+        getattr(forget_task, "name", str(forget_task)),
+        getattr(retain_task, "name", str(retain_task)) if retain_task is not None else None,
+        config.max_steps,
+        config.per_device_batch_size,
+    )
     lora_cfg = build_lora_config()
     target_params = _target_weight_params(model, lora_cfg.target_modules)
     if not target_params:
+        logger.error("No target modules matched for slice initialization.")
         raise RuntimeError("No target modules matched for slice initialization.")
 
+    logger.info("Matched %d target weight parameters for slice init", len(target_params))
     forget_ds, _ = load_training_dataset(task=forget_task, eval_size=1, seed=config.seed)
     forget_ds = _tokenize_dataset(forget_ds, tokenizer=tokenizer, max_length=config.max_seq_length)
+    logger.info("Building forget dataloader: dataset_size=%d batch_size=%d", len(forget_ds), config.per_device_batch_size)
     forget_loader = _build_dataloader(
         forget_ds,
         tokenizer=tokenizer,
@@ -163,7 +177,11 @@ def compute_slice_inits(
         device=device,
         max_steps=config.max_steps,
     )
-
+    logger.info("Collected forget gradients: steps=%d modules=%d", steps_f, len(grads_f))
+    for i, (n, g) in enumerate(grads_f.items()):
+        if i >= 5:
+            break
+        logger.debug("forget grad sample: module=%s norm=%.6g", n, float(g.norm().item()))
     grads_r = None
     steps_r = 0
     if retain_task is not None:
@@ -173,6 +191,7 @@ def compute_slice_inits(
             tokenizer=tokenizer,
             max_length=config.max_seq_length,
         )
+        logger.info("Building retain dataloader: dataset_size=%d batch_size=%d", len(retain_ds), config.per_device_batch_size)
         retain_loader = _build_dataloader(
             retain_ds,
             tokenizer=tokenizer,
@@ -186,6 +205,11 @@ def compute_slice_inits(
             device=device,
             max_steps=config.max_steps,
         )
+        logger.info("Collected retain gradients: steps=%d modules=%d", steps_r, len(grads_r))
+        for i, (n, g) in enumerate(grads_r.items()):
+            if i >= 5:
+                break
+            logger.debug("retain grad sample: module=%s norm=%.6g", n, float(g.norm().item()))
 
     denom_f = max(1, steps_f)
     grads_f = {k: v / float(denom_f) for k, v in grads_f.items()}
@@ -194,9 +218,15 @@ def compute_slice_inits(
         grads_r = {k: v / float(denom_r) for k, v in grads_r.items()}
 
     combined = _combine_grads(grads_f, grads_r, config.retain_scale)
+    logger.info("Built combined gradient matrix for %d modules (retain_scale=%s)", len(combined), config.retain_scale)
 
     r_use = config.rank or int(getattr(lora_cfg, "r", 8))
-    inits = {name: _build_ab_from_gradient(g, r=r_use) for name, g in combined.items()}
+    inits = {}
+    for name, g in combined.items():
+        logger.info("Building A/B for module %s: G_shape=%s r=%d", name, tuple(g.shape), r_use)
+        ab = _build_ab_from_gradient(g, r=r_use)
+        logger.debug("Built A/B for %s: A_shape=%s B_shape=%s", name, tuple(ab['A'].shape), tuple(ab['B'].shape))
+        inits[name] = ab
     return inits
 
 
@@ -219,7 +249,9 @@ def load_or_compute_slice_inits(
     cache_key = make_cache_key(payload)
     cached = load_slice_cache(config.cache_dir, cache_key, device=_model_device(model))
     if cached is not None:
+        logger.info("Slice cache hit: cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(cached.inits))
         return cached.inits
+    logger.info("Slice cache miss: will compute inits (cache_dir=%s cache_key=%s)", config.cache_dir, cache_key)
 
     inits = compute_slice_inits(
         model=model,
@@ -235,42 +267,142 @@ def load_or_compute_slice_inits(
         SliceCacheEntry(inits=inits),
         meta={"payload": payload},
     )
+    logger.info("Saved slice cache: cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(inits))
     return inits
 
 
 def apply_slice_inits(
     peft_model: torch.nn.Module,
     inits: Dict[str, Dict[str, torch.Tensor]],
+    *,
+    lora_alpha: float = 1.0,
+    r: Optional[int] = None,
+    decomposition: Optional[str] = None,
 ) -> int:
+    """Apply slice inits to a PEFT LoRA model with in-place absorption."""
     from peft.tuners.lora import Linear as LoraLinear
 
-    named_modules = dict(peft_model.named_modules())
-    num_written = 0
+    def _normalize_name(name: str) -> str:
+        out = str(name)
+        out = out.replace(".weight", "")
+        out = out.replace(".base_layer", "")
+        return out
 
-    for module_name, ab in inits.items():
-        target_module = None
-        for name, mod in named_modules.items():
-            if isinstance(mod, LoraLinear) and module_name in name:
-                target_module = mod
-                break
-        if target_module is None:
+    def _resolve_target_module(init_key: str, index: Dict[str, str]) -> Optional[str]:
+        nk = _normalize_name(init_key)
+        exact = index.get(nk)
+        if exact is not None:
+            return exact
+
+        # Robust fallback when one side has extra prefixes.
+        candidates = [
+            real_name
+            for norm_name, real_name in index.items()
+            if norm_name.endswith(nk) or nk.endswith(norm_name)
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    skip_absorption = decomposition in {
+        "right_singular_vectors",
+        "right_singular_vectors_kaiming",
+        "right_svd_kaiming_random_basis",
+    }
+
+    if r is None or int(r) <= 0:
+        raise RuntimeError("slice apply requires a valid LoRA rank `r` for absorption.")
+
+    named_modules = dict(peft_model.named_modules())
+    logger.info("Applying slice inits with in-place absorption: candidate_modules=%d", len(inits))
+
+    lora_index: Dict[str, str] = {}
+    lora_names: list[str] = []
+    for module_name, mod in named_modules.items():
+        if not isinstance(mod, LoraLinear):
+            continue
+        normalized = _normalize_name(module_name)
+        lora_index[normalized] = module_name
+        lora_names.append(module_name)
+
+    sample_init_keys = list(inits.keys())[:5]
+    sample_lora_names = lora_names[:5]
+    logger.debug("Slice sample init keys: %s", sample_init_keys)
+    logger.debug("Slice sample LoRA modules: %s", sample_lora_names)
+
+    num_written = 0
+    num_skipped = 0
+    for init_key, ab in inits.items():
+        target_name = _resolve_target_module(init_key, lora_index)
+        if target_name is None:
+            logger.debug("No PEFT LoRA module matched for init key %s; skipping", init_key)
+            num_skipped += 1
             continue
 
-        A_tgt = target_module.lora_A["default"].weight
-        B_tgt = target_module.lora_B["default"].weight
+        logger.debug("slice map: init_key=%s -> peft_module=%s", init_key, target_name)
+        module = named_modules[target_name]
+        A_tgt = module.lora_A["default"].weight
+        B_tgt = module.lora_B["default"].weight
 
         if A_tgt.shape != ab["A"].shape or B_tgt.shape != ab["B"].shape:
             raise RuntimeError(
-                f"Slice init shape mismatch for {module_name}: "
-                f"A_tgt={A_tgt.shape}, A_init={ab['A'].shape}, "
-                f"B_tgt={B_tgt.shape}, B_init={ab['B'].shape}"
+                f"Slice init shape mismatch for layer {init_key}: "
+                f"A_tgt.shape={A_tgt.shape}, A_init.shape={ab['A'].shape}, "
+                f"B_tgt.shape={B_tgt.shape}, B_init.shape={ab['B'].shape}"
             )
 
         with torch.no_grad():
             A_tgt.copy_(ab["A"].to(device=A_tgt.device, dtype=A_tgt.dtype))
             B_tgt.copy_(ab["B"].to(device=B_tgt.device, dtype=B_tgt.dtype))
+
+            if not skip_absorption:
+                base_layer = None
+                if hasattr(module, "get_base_layer"):
+                    try:
+                        base_layer = module.get_base_layer()
+                    except Exception as exc:
+                        raise RuntimeError(f"Failed to get base layer for LoRA module {init_key}") from exc
+
+                base_weight = getattr(base_layer, "weight", None) if base_layer is not None else None
+                if isinstance(base_weight, torch.nn.Parameter):
+                    scaling_val = float(lora_alpha) / float(r)
+                    orig_dtype = base_weight.dtype
+
+                    weight_orig32 = base_weight.data.to(torch.float32).clone()
+                    B_mat = B_tgt.to(dtype=torch.float32)
+                    A_mat = A_tgt.to(dtype=torch.float32)
+                    offset32 = (B_mat @ A_mat) * float(scaling_val)
+
+                    weight32 = weight_orig32 - offset32
+                    base_weight.data.copy_(weight32.to(orig_dtype))
+
+                    recon32 = weight32 + offset32
+                    diff = (recon32 - weight_orig32).abs().max()
+                    tol = 1e-4 if orig_dtype in (torch.float16, torch.bfloat16) else 1e-7
+                    if diff > tol:
+                        logger.warning(
+                            "[slice] LoRA absorption diff for layer %s: max|W_frozen+DeltaW-W_orig|=%.3e (tol=%.3e)",
+                            init_key,
+                            diff.item(),
+                            tol,
+                        )
+                    else:
+                        logger.info(
+                            "[slice] LoRA absorption OK for layer %s: max|W_frozen+DeltaW-W_orig|=%.3e (tol=%.3e)",
+                            init_key,
+                            diff.item(),
+                            tol,
+                        )
+            else:
+                logger.info(
+                    "[slice] Skipping LoRA absorption for layer %s due to decomposition='%s'",
+                    init_key,
+                    decomposition,
+                )
+
         num_written += 1
 
+    logger.info("Applied slice A/B to %d LoRA modules (skipped=%d)", num_written, num_skipped)
     return num_written
 
 
@@ -289,4 +421,9 @@ def initialize_lora_with_slice(
         retain_task=retain_task,
         config=config,
     )
-    return apply_slice_inits(model, inits)
+
+    # Attempt to infer LoRA alpha and rank from the PEFT model if present
+    lora_alpha = getattr(config, "lora_alpha", 1.0)
+    r_val = getattr(config, "rank", None)
+    # Delegate to apply_slice_inits which will try absorption when possible
+    return apply_slice_inits(model, inits, lora_alpha=lora_alpha, r=r_val)

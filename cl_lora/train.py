@@ -19,6 +19,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+import logging
 
 try:
     from .load_dataset import load_training_dataset
@@ -115,7 +116,8 @@ def train_on_task(
     train_dataset = _tokenize_dataset(train_dataset, tokenizer=tokenizer, max_length=max_seq_length)
     eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
 
-    lora_model = get_peft_model(model, build_lora_config())
+    lora_cfg = build_lora_config()
+    lora_model = get_peft_model(model, lora_cfg)
     lora_model.print_trainable_parameters()
 
     if slice_enabled:
@@ -128,13 +130,22 @@ def train_on_task(
             rank=slice_rank,
             max_seq_length=max_seq_length,
         )
-        initialize_lora_with_slice(
+        # propagate PEFT lora settings into slice config when available
+        try:
+            slice_config.rank = slice_config.rank or int(getattr(lora_cfg, "r", 0) or 0)
+            # lora_alpha may be present on the LoraConfig
+            setattr(slice_config, "lora_alpha", float(getattr(lora_cfg, "lora_alpha", 1.0)))
+        except Exception:
+            pass
+        logger = logging.getLogger("cl_lora.train.slice")
+        num_written = initialize_lora_with_slice(
             model=lora_model,
             tokenizer=tokenizer,
             forget_task=task,
             retain_task=retain_task,
             config=slice_config,
         )
+        logger.info("Slice init applied: num_modules_written=%d", int(num_written))
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
