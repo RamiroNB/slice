@@ -166,3 +166,17 @@ Defined in cl_lora/task_sequences.py:
 VERIFY...
 
 Change stage checkpoint to not save model every time, or not save it on other path
+
+
+
+
+quick eval: 
+```
+CUDA_VISIBLE_DEVICES=1 python -m cl_lora.orchestrator \
+  --sequence NI-Seq-Dummy \
+  --general-eval-set core \
+  --eval-size 10 \
+  --task-eval-samples 5 \
+  --run-name quick_eval_dev01 \
+  --quick-eval
+```

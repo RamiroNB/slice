@@ -54,6 +54,7 @@ def run_sequence(
     eval_size: int,
     task_eval_samples: int,
     task_eval_max_new_tokens: int,
+    quick_eval: bool,
     save_final_model: bool,
     resume: bool,
     rank: int,
@@ -172,6 +173,7 @@ def run_sequence(
             eval_size=eval_size,
             task_eval_samples=task_eval_samples,
             task_eval_max_new_tokens=task_eval_max_new_tokens,
+            quick_eval=quick_eval,
         )
 
         stage_record = {
@@ -233,6 +235,11 @@ def main() -> None:
         choices=["core", "all"],
         default="core",
         help="Use the core 4 general tasks or all configured general tasks.",
+    )
+    parser.add_argument(
+        "--quick-eval",
+        action="store_true",
+        help="Perplexity-only seen-task evaluation (skips GP/IP and generation-based seen-task metrics).",
     )
     parser.add_argument("--eval-size", type=int, default=200)
     parser.add_argument("--task-eval-samples", type=int, default=64)
@@ -297,6 +304,7 @@ def main() -> None:
 
     print(f"Sequence: {args.sequence}")
     print(f"General eval tasks: {general_eval_keys}")
+    print(f"Quick eval mode: {'ON (perplexity-only)' if args.quick_eval else 'OFF'}")
     print(f"Results dir: {run_output_dir}")
 
     payload = run_sequence(
@@ -308,6 +316,7 @@ def main() -> None:
         eval_size=args.eval_size,
         task_eval_samples=args.task_eval_samples,
         task_eval_max_new_tokens=args.task_eval_max_new_tokens,
+        quick_eval=args.quick_eval,
         save_final_model=args.save_final_model,
         resume=args.resume,
         rank=args.rank,
