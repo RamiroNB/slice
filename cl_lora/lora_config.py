@@ -1,6 +1,6 @@
 from peft import LoraConfig, TaskType
 
-def build_lora_config(r: int = 8, lora_alpha: int = 16, lora_dropout: float = 0.1):
+def build_lora_config(r: int = 128, lora_alpha: int = 16, lora_dropout: float = 0.1):
     config = LoraConfig(
         r=r,
         lora_alpha=lora_alpha,
@@ -10,7 +10,10 @@ def build_lora_config(r: int = 8, lora_alpha: int = 16, lora_dropout: float = 0.
             "q_proj",
             "k_proj",
             "v_proj",
-            "o_proj"
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
         ],
         # target_modules="all_linear",
         bias="none",

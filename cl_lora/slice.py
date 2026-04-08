@@ -106,19 +106,26 @@ def _accumulate_gradients(
 
 def _build_ab_from_gradient(G: torch.Tensor, r: int) -> Dict[str, torch.Tensor]:
     device = G.device
+    _, d_in = G.shape
     G32 = G.float()
     q = min(4 * r, min(G32.shape))
     if q <= 0:
         raise ValueError("Invalid rank for slice initialization")
 
-    U, S, V = torch.svd_lowrank(G32, q=q, niter=4)
-    U_r = U[:, :r]
-    S_r = S[:r]
-    V_r_rows = V[:, :r].t()
+    U, _, V = torch.svd_lowrank(G32, q=q, niter=4)
 
-    D = torch.diag(S_r.sqrt())
-    B = U_r @ D
-    A = D @ V_r_rows
+    Vt = V.t()
+    B = U[:, :r]
+    A = Vt[r : 2 * r, :]
+
+    recon = B @ A
+    eps = 1e-12
+    var_recon = float(torch.var(recon).item()) if torch.var(recon).item() != 0.0 else eps
+    factor = (1.0 / (3.0 * d_in) ** 0.25) / (var_recon ** 0.25)
+    
+    A = factor * A
+    B = factor * B
+
     return {
         "A": A.to(device=device, dtype=G.dtype).contiguous(),
         "B": B.to(device=device, dtype=G.dtype).contiguous(),
@@ -375,6 +382,12 @@ def apply_slice_inits(
     """Apply slice inits to a PEFT LoRA model with in-place absorption."""
     from peft.tuners.lora import Linear as LoraLinear
 
+    def _tensor_mean_var(t: torch.Tensor) -> tuple[float, float]:
+        t32 = t.detach().to(dtype=torch.float32)
+        mean_val = float(t32.mean().item())
+        var_val = float(t32.var(unbiased=False).item())
+        return mean_val, var_val
+
     def _normalize_name(name: str) -> str:
         out = str(name)
         out = out.replace(".weight", "")
@@ -447,6 +460,23 @@ def apply_slice_inits(
         with torch.no_grad():
             A_tgt.copy_(ab["A"].to(device=A_tgt.device, dtype=A_tgt.dtype))
             B_tgt.copy_(ab["B"].to(device=B_tgt.device, dtype=B_tgt.dtype))
+
+            if logger.isEnabledFor(logging.DEBUG):
+                a_mean, a_var = _tensor_mean_var(A_tgt)
+                b_mean, b_var = _tensor_mean_var(B_tgt)
+                logger.debug(
+                    "[slice] final layer stats: layer=%s A(mean=%.6g,var=%.6g,shape=%s,dtype=%s) "
+                    "B(mean=%.6g,var=%.6g,shape=%s,dtype=%s)",
+                    init_key,
+                    a_mean,
+                    a_var,
+                    tuple(A_tgt.shape),
+                    str(A_tgt.dtype).replace("torch.", ""),
+                    b_mean,
+                    b_var,
+                    tuple(B_tgt.shape),
+                    str(B_tgt.dtype).replace("torch.", ""),
+                )
 
             if not skip_absorption:
                 base_layer = None

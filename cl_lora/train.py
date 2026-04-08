@@ -88,6 +88,7 @@ def train_on_task(
     task,
     output_dir: str,
     retain_task=None,
+    rank: int = 128,
     learning_rate: float = 1e-4,
     num_train_epochs: float = 3.0,
     per_device_train_batch_size: int = 8,
@@ -108,7 +109,6 @@ def train_on_task(
     slice_grad_project: bool = False,
     slice_grad_projection_mode: str = "per_module",
     slice_add_retain_grad: bool = False,
-    slice_rank: int | None = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train a fresh LoRA adapter on one task, then merge it into the model.
 
@@ -119,7 +119,7 @@ def train_on_task(
     train_dataset = _tokenize_dataset(train_dataset, tokenizer=tokenizer, max_length=max_seq_length)
     eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
 
-    lora_cfg = build_lora_config()
+    lora_cfg = build_lora_config(r=rank)
     lora_model = get_peft_model(model, lora_cfg)
     lora_model.print_trainable_parameters()
 
@@ -133,13 +133,11 @@ def train_on_task(
             grad_project=slice_grad_project,
             grad_projection_mode=slice_grad_projection_mode,
             add_retain_grad=slice_add_retain_grad,
-            rank=slice_rank,
+            rank=rank,
             max_seq_length=max_seq_length,
         )
         # propagate PEFT lora settings into slice config when available
         try:
-            slice_config.rank = slice_config.rank or int(getattr(lora_cfg, "r", 0) or 0)
-            # lora_alpha may be present on the LoraConfig
             setattr(slice_config, "lora_alpha", float(getattr(lora_cfg, "lora_alpha", 1.0)))
         except Exception:
             pass
@@ -221,6 +219,12 @@ def main() -> None:
     parser.add_argument("--model-name", default=MODEL_NAME)
     parser.add_argument("--output-dir", default="outputs/single_task")
     parser.add_argument("--save-merged-model", action="store_true")
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=128,
+        help="LoRA rank (also used for slice init when --slice-init is enabled).",
+    )
     parser.add_argument("--slice-init", action="store_true", help="Enable slice LoRA init.")
     parser.add_argument("--slice-cache-dir", default="slice_cache")
     parser.add_argument("--slice-max-steps", type=int, default=100)
@@ -237,7 +241,6 @@ def main() -> None:
         action="store_true",
         help="Add retain gradient after projection when --slice-grad-project is enabled.",
     )
-    parser.add_argument("--slice-rank", type=int, default=None)
     args = parser.parse_args()
 
     tokenizer = build_tokenizer(model_name=args.model_name, hf_token=HF_TOKEN)
@@ -249,6 +252,7 @@ def main() -> None:
         task=args.task,
         output_dir=args.output_dir,
         retain_task=args.retain_task,
+        rank=args.rank,
         slice_enabled=args.slice_init,
         slice_cache_dir=args.slice_cache_dir,
         slice_max_steps=args.slice_max_steps,
@@ -256,7 +260,6 @@ def main() -> None:
         slice_grad_project=args.slice_grad_project,
         slice_grad_projection_mode=args.slice_grad_projection_mode,
         slice_add_retain_grad=args.slice_add_retain_grad,
-        slice_rank=args.slice_rank,
     )
 
     if args.save_merged_model:

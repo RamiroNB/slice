@@ -56,6 +56,7 @@ def run_sequence(
     task_eval_max_new_tokens: int,
     save_final_model: bool,
     resume: bool,
+    rank: int,
     slice_enabled: bool,
     slice_cache_dir: str,
     slice_max_steps: int,
@@ -63,7 +64,6 @@ def run_sequence(
     slice_grad_project: bool,
     slice_grad_projection_mode: str,
     slice_add_retain_grad: bool,
-    slice_rank: int | None,
 ) -> Dict[str, Any]:
     sequence = get_sequence(sequence_name)
     task_order = [task.name for task in sequence.tasks]
@@ -143,6 +143,7 @@ def run_sequence(
             output_dir=str(stage_train_dir),
             eval_size=eval_size,
             retain_task=retain_task,
+            rank=rank,
             slice_enabled=slice_enabled,
             slice_cache_dir=slice_cache_dir,
             slice_max_steps=slice_max_steps,
@@ -150,7 +151,6 @@ def run_sequence(
             slice_grad_project=slice_grad_project,
             slice_grad_projection_mode=slice_grad_projection_mode,
             slice_add_retain_grad=slice_add_retain_grad,
-            slice_rank=slice_rank,
         )
 
         seen_tasks.append(task)
@@ -235,6 +235,12 @@ def main() -> None:
     parser.add_argument("--slice-cache-dir", default="slice_cache")
     parser.add_argument("--slice-max-steps", type=int, default=100)
     parser.add_argument("--slice-retain-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=128,
+        help="LoRA rank (also used for slice init when --slice-init is enabled).",
+    )
     parser.add_argument("--slice-grad-project", action="store_true", help="Project forget gradients against retain gradients for slice init.")
     parser.add_argument(
         "--slice-grad-projection-mode",
@@ -247,7 +253,6 @@ def main() -> None:
         action="store_true",
         help="Add retain gradient after projection when --slice-grad-project is enabled.",
     )
-    parser.add_argument("--slice-rank", type=int, default=None)
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
 
@@ -256,7 +261,19 @@ def main() -> None:
         lvl = getattr(logging, args.log_level.upper(), logging.INFO)
     except Exception:
         lvl = logging.INFO
-    logging.basicConfig(level=lvl, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # basicConfig is a no-op if handlers are already set up; force=True makes this reliable.
+    try:
+        logging.basicConfig(
+            level=lvl,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            force=True,
+        )
+    except TypeError:
+        logging.basicConfig(level=lvl, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    # Ensure our package loggers follow the requested level.
+    logging.getLogger("cl_lora").setLevel(lvl)
+    logging.getLogger("cl_lora.slice").setLevel(lvl)
     # Reduce verbosity of very chatty third-party libraries by default
     logging.getLogger("transformers").setLevel(logging.WARNING)
     logging.getLogger("peft").setLevel(logging.WARNING)
@@ -284,6 +301,7 @@ def main() -> None:
         task_eval_max_new_tokens=args.task_eval_max_new_tokens,
         save_final_model=args.save_final_model,
         resume=args.resume,
+        rank=args.rank,
         slice_enabled=args.slice_init,
         slice_cache_dir=args.slice_cache_dir,
         slice_max_steps=args.slice_max_steps,
@@ -291,7 +309,6 @@ def main() -> None:
         slice_grad_project=args.slice_grad_project,
         slice_grad_projection_mode=args.slice_grad_projection_mode,
         slice_add_retain_grad=args.slice_add_retain_grad,
-        slice_rank=args.slice_rank,
     )
 
     print("\n=== Final Metrics ===")
