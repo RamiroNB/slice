@@ -50,6 +50,7 @@ _patch_accelerate_unwrap_model_compat()
 load_dotenv()
 
 MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
+# MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 HF_TOKEN = os.getenv("HUGGING_TOKEN")
 
 

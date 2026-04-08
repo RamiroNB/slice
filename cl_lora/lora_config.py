@@ -1,6 +1,6 @@
 from peft import LoraConfig, TaskType
 
-def build_lora_config(r: int = 128, lora_alpha: int = 16, lora_dropout: float = 0.1):
+def build_lora_config(r: int = 64, lora_alpha: int = 2, lora_dropout: float = 0.0):
     config = LoraConfig(
         r=r,
         lora_alpha=lora_alpha,
