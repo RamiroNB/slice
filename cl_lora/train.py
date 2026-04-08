@@ -170,6 +170,7 @@ def train_on_task(
         num_train_epochs=num_train_epochs,
         logging_steps=logging_steps,
         save_steps=save_steps,
+        warmup_ratio=0.01,
         save_total_limit=2,
         eval_strategy="steps",
         eval_steps=eval_steps,

@@ -23,7 +23,7 @@ class SliceInitConfig:
     cache_dir: str = "slice_cache"
     cache_context: Optional[str] = None
     max_steps: int = 100
-    per_device_batch_size: int = 4
+    per_device_batch_size: int = 64
     seed: int = 42
     retain_scale: float = 1.0
     grad_project: bool = False
@@ -107,7 +107,7 @@ def _accumulate_gradients(
 
 def _build_ab_from_gradient(G: torch.Tensor, r: int) -> Dict[str, torch.Tensor]:
     device = G.device
-    _, d_in = G.shape
+    d_out, d_in = G.shape
     G32 = G.float()
     q = min(4 * r, min(G32.shape))
     if q <= 0:
@@ -119,13 +119,16 @@ def _build_ab_from_gradient(G: torch.Tensor, r: int) -> Dict[str, torch.Tensor]:
     B = U[:, :r]
     A = Vt[r : 2 * r, :]
 
-    recon = B @ A
-    eps = 1e-12
-    var_recon = float(torch.var(recon).item()) if torch.var(recon).item() != 0.0 else eps
-    factor = (1.0 / (3.0 * d_in) ** 0.25) / (var_recon ** 0.25)
-    
-    A = factor * A
-    B = factor * B
+    # recon = B @ A
+    # eps = 1e-12
+    # var_recon = float(torch.var(recon).item()) if torch.var(recon).item() != 0.0 else eps
+    # factor = (1.0 / (3.0 * d_in) ** 0.25) / (var_recon ** 0.25)
+    # A = factor * A
+    # B = factor * B
+
+    scale_ga = (d_out ** 0.25) / (64 ** 0.5)
+    B = B * scale_ga
+    A = A * scale_ga
 
     return {
         "A": A.to(device=device, dtype=G.dtype).contiguous(),
