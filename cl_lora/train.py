@@ -109,6 +109,7 @@ def train_on_task(
     slice_grad_project: bool = False,
     slice_grad_projection_mode: str = "per_module",
     slice_add_retain_grad: bool = False,
+    slice_cache_context: str | None = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train a fresh LoRA adapter on one task, then merge it into the model.
 
@@ -124,8 +125,13 @@ def train_on_task(
     lora_model.print_trainable_parameters()
 
     if slice_enabled:
+        model_id = (
+            getattr(getattr(model, "config", None), "_name_or_path", None)
+            or getattr(model, "name_or_path", None)
+        )
         slice_config = SliceInitConfig(
             cache_dir=slice_cache_dir,
+            cache_context=slice_cache_context or (str(model_id) if model_id else None),
             max_steps=slice_max_steps,
             per_device_batch_size=per_device_train_batch_size,
             seed=seed,

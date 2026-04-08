@@ -21,6 +21,7 @@ except ImportError:
 @dataclass
 class SliceInitConfig:
     cache_dir: str = "slice_cache"
+    cache_context: Optional[str] = None
     max_steps: int = 100
     per_device_batch_size: int = 4
     seed: int = 42
@@ -335,16 +336,52 @@ def load_or_compute_slice_inits(
     *,
     config: SliceInitConfig,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
+    def _task_fingerprint(task_obj) -> Optional[Dict[str, object]]:
+        if task_obj is None:
+            return None
+        fp: Dict[str, object] = {
+            "type": task_obj.__class__.__name__,
+            "name": getattr(task_obj, "name", str(task_obj)),
+        }
+        # SuperNI tasks
+        for k in ("ni_id", "hf_config", "source", "category"):
+            if hasattr(task_obj, k):
+                fp[k] = getattr(task_obj, k)
+        # TRACE tasks
+        for k in ("hf_dataset", "language", "metric"):
+            if hasattr(task_obj, k):
+                fp[k] = getattr(task_obj, k)
+        return fp
+
+    # Include LoRA settings used to define which weights slice targets.
+    # (If these change, cached inits must not be reused.)
+    lora_cfg = build_lora_config(r=int(config.rank or 128))
+    lora_payload = {
+        "r": int(getattr(lora_cfg, "r", 0) or 0),
+        "lora_alpha": float(getattr(lora_cfg, "lora_alpha", 1.0)),
+        "lora_dropout": float(getattr(lora_cfg, "lora_dropout", 0.0)),
+        "bias": str(getattr(lora_cfg, "bias", "none")),
+        "use_rslora": bool(getattr(lora_cfg, "use_rslora", False)) if hasattr(lora_cfg, "use_rslora") else None,
+        "target_modules": list(getattr(lora_cfg, "target_modules", []) or []),
+    }
+
     payload = {
-        "forget_task": getattr(forget_task, "name", str(forget_task)),
-        "retain_task": getattr(retain_task, "name", str(retain_task)) if retain_task else None,
+        "cache_context": config.cache_context,
+        "forget_task": _task_fingerprint(forget_task),
+        "retain_task": _task_fingerprint(retain_task) if retain_task else None,
         "rank": config.rank,
+        "seed": config.seed,
+        "max_seq_length": config.max_seq_length,
         "max_steps": config.max_steps,
         "batch_size": config.per_device_batch_size,
         "retain_scale": config.retain_scale,
         "grad_project": config.grad_project,
         "grad_projection_mode": config.grad_projection_mode,
         "add_retain_grad": config.add_retain_grad,
+        "lora": lora_payload,
+        "model": {
+            "class": model.__class__.__name__,
+        },
     }
     cache_key = make_cache_key(payload)
     cached = load_slice_cache(config.cache_dir, cache_key, device=_model_device(model))

@@ -136,6 +136,14 @@ def run_sequence(
         print(f"\n=== Stage {idx}/{len(sequence.tasks)} | Training task: {task_name} ===")
         retain_task = sequence.tasks[idx - 2] if idx > 1 else None
 
+        if idx == 1:
+            slice_cache_context = f"base_model:{model_name}"
+        else:
+            prev_task_name = sequence.tasks[idx - 2].name
+            prev_safe = _safe_name(prev_task_name)
+            prev_checkpoint_dir = checkpoint_root / f"stage_{idx - 1:02d}_{prev_safe}" / "merged_model"
+            slice_cache_context = f"checkpoint:{prev_checkpoint_dir}"
+
         model, train_report = train_on_task(
             model=model,
             tokenizer=tokenizer,
@@ -146,6 +154,7 @@ def run_sequence(
             rank=rank,
             slice_enabled=slice_enabled,
             slice_cache_dir=slice_cache_dir,
+            slice_cache_context=slice_cache_context,
             slice_max_steps=slice_max_steps,
             slice_retain_scale=slice_retain_scale,
             slice_grad_project=slice_grad_project,
