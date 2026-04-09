@@ -3,20 +3,41 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+import logging
+
+try:
+    from importlib import metadata as importlib_metadata  # py3.8+
+except Exception:  # pragma: no cover
+    import importlib_metadata  # type: ignore
 
 try:
     from .eval import evaluate_all
     from .metrics import compute_cl_metrics
+    from .repro import set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
     from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, train_on_task
 except ImportError:
     from eval import evaluate_all
     from metrics import compute_cl_metrics
+    from repro import set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
     from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, train_on_task
+
+
+def _collect_fn_defaults(fn) -> Dict[str, Any]:
+    import inspect
+
+    sig = inspect.signature(fn)
+    out: Dict[str, Any] = {}
+    for name, param in sig.parameters.items():
+        if param.default is inspect._empty:
+            continue
+        out[name] = param.default
+    return out
 
 
 def _safe_name(name: str) -> str:
@@ -44,20 +65,127 @@ def _read_json(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+def _pkg_version(dist_name: str) -> str | None:
+    try:
+        return str(importlib_metadata.version(dist_name))
+    except Exception:
+        return None
+
+
+def _collect_env_info() -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "python": sys.version,
+        "packages": {
+            "torch": _pkg_version("torch"),
+            "transformers": _pkg_version("transformers"),
+            "accelerate": _pkg_version("accelerate"),
+            "peft": _pkg_version("peft"),
+            "datasets": _pkg_version("datasets"),
+        },
+    }
+
+    try:
+        import torch
+
+        info["cuda"] = {
+            "available": bool(torch.cuda.is_available()),
+            "device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+            "version": getattr(torch.version, "cuda", None),
+        }
+    except Exception:
+        pass
+
+    return info
+
+
+def _collect_model_info(model) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "class": model.__class__.__name__,
+        "name_or_path": getattr(getattr(model, "config", None), "_name_or_path", None)
+        or getattr(model, "name_or_path", None),
+    }
+    cfg = getattr(model, "config", None)
+    if cfg is not None and hasattr(cfg, "to_dict"):
+        try:
+            out["config"] = cfg.to_dict()
+        except Exception:
+            out["config"] = str(cfg)
+    return out
+
+
+def _collect_tokenizer_info(tokenizer) -> Dict[str, Any]:
+    return {
+        "class": tokenizer.__class__.__name__,
+        "name_or_path": getattr(tokenizer, "name_or_path", None),
+        "pad_token": getattr(tokenizer, "pad_token", None),
+        "eos_token": getattr(tokenizer, "eos_token", None),
+        "bos_token": getattr(tokenizer, "bos_token", None),
+        "unk_token": getattr(tokenizer, "unk_token", None),
+        "padding_side": getattr(tokenizer, "padding_side", None),
+        "model_max_length": getattr(tokenizer, "model_max_length", None),
+    }
+
+
 def run_sequence(
     sequence_name: str,
     model_name: str,
     run_output_dir: Path,
     train_output_dir: Path,
     general_eval_keys: List[str],
+    seed: int,
     eval_size: int,
     task_eval_samples: int,
     task_eval_max_new_tokens: int,
+    quick_eval: bool,
     save_final_model: bool,
     resume: bool,
+    rank: int,
+    slice_enabled: bool,
+    slice_cache_dir: str,
+    slice_max_steps: int,
+    slice_retain_scale: float,
+    slice_grad_project: bool,
+    slice_grad_projection_mode: str,
+    slice_add_retain_grad: bool,
+    orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    set_global_seed(seed)
+    run_output_dir.mkdir(parents=True, exist_ok=True)
     sequence = get_sequence(sequence_name)
     task_order = [task.name for task in sequence.tasks]
+
+    resolved_cfg: Dict[str, Any] = {
+        "sequence": sequence_name,
+        "description": sequence.description,
+        "task_order": task_order,
+        "general_eval_keys": general_eval_keys,
+        "seed": seed,
+        "quick_eval": bool(quick_eval),
+        "eval_size": int(eval_size),
+        "task_eval_samples": int(task_eval_samples),
+        "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
+        "rank": int(rank),
+        "slice_enabled": bool(slice_enabled),
+        "slice_cache_dir": slice_cache_dir,
+        "slice_max_steps": int(slice_max_steps),
+        "slice_retain_scale": float(slice_retain_scale),
+        "slice_grad_project": bool(slice_grad_project),
+        "slice_grad_projection_mode": str(slice_grad_projection_mode),
+        "slice_add_retain_grad": bool(slice_add_retain_grad),
+    }
+
+    run_cfg_payload: Dict[str, Any] = {
+        "orchestrator": orchestrator_config or {},
+        "env": _collect_env_info(),
+        "resolved": resolved_cfg,
+        "model": None,
+        "tokenizer": None,
+        "notes": {
+            "hf_token_present": bool(HF_TOKEN),
+            "hf_token_redacted": True,
+        },
+    }
+    _write_json(run_output_dir / "run_config.json", run_cfg_payload)
 
     partial_path = run_output_dir / "stage_records.partial.json"
     checkpoint_root = run_output_dir / "checkpoints"
@@ -116,6 +244,10 @@ def run_sequence(
         tokenizer = build_tokenizer(model_name=model_name, hf_token=HF_TOKEN)
         model = load_base_model(model_name=model_name, hf_token=HF_TOKEN)
 
+    run_cfg_payload["model"] = _collect_model_info(model)
+    run_cfg_payload["tokenizer"] = _collect_tokenizer_info(tokenizer)
+    _write_json(run_output_dir / "run_config.json", run_cfg_payload)
+
     for idx in range(start_stage, len(sequence.tasks) + 1):
         task = sequence.tasks[idx - 1]
         task_name = task.name
@@ -125,12 +257,33 @@ def run_sequence(
         stage_eval_dir = run_output_dir / "stages" / f"stage_{idx:02d}_{safe_task_name}"
 
         print(f"\n=== Stage {idx}/{len(sequence.tasks)} | Training task: {task_name} ===")
+        retain_task = sequence.tasks[idx - 2] if idx > 1 else None
+
+        if idx == 1:
+            slice_cache_context = f"base_model:{model_name}"
+        else:
+            prev_task_name = sequence.tasks[idx - 2].name
+            prev_safe = _safe_name(prev_task_name)
+            prev_checkpoint_dir = checkpoint_root / f"stage_{idx - 1:02d}_{prev_safe}" / "merged_model"
+            slice_cache_context = f"checkpoint:{prev_checkpoint_dir}"
+
         model, train_report = train_on_task(
             model=model,
             tokenizer=tokenizer,
             task=task,
             output_dir=str(stage_train_dir),
             eval_size=eval_size,
+            seed=seed,
+            retain_task=retain_task,
+            rank=rank,
+            slice_enabled=slice_enabled,
+            slice_cache_dir=slice_cache_dir,
+            slice_cache_context=slice_cache_context,
+            slice_max_steps=slice_max_steps,
+            slice_retain_scale=slice_retain_scale,
+            slice_grad_project=slice_grad_project,
+            slice_grad_projection_mode=slice_grad_projection_mode,
+            slice_add_retain_grad=slice_add_retain_grad,
         )
 
         seen_tasks.append(task)
@@ -143,6 +296,8 @@ def run_sequence(
             eval_size=eval_size,
             task_eval_samples=task_eval_samples,
             task_eval_max_new_tokens=task_eval_max_new_tokens,
+            quick_eval=quick_eval,
+            seed=seed,
         )
 
         stage_record = {
@@ -205,13 +360,66 @@ def main() -> None:
         default="core",
         help="Use the core 4 general tasks or all configured general tasks.",
     )
+    parser.add_argument(
+        "--quick-eval",
+        action="store_true",
+        help="Perplexity-only seen-task evaluation (skips GP/IP and generation-based seen-task metrics).",
+    )
     parser.add_argument("--eval-size", type=int, default=200)
+    parser.add_argument("--seed", type=int, default=42, help="Global RNG seed for reproducibility.")
     parser.add_argument("--task-eval-samples", type=int, default=64)
     parser.add_argument("--task-eval-max-new-tokens", type=int, default=64)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--save-final-model", action="store_true")
+    parser.add_argument("--slice-init", action="store_true", help="Enable slice LoRA init.")
+    parser.add_argument("--slice-cache-dir", default="slice_cache")
+    parser.add_argument("--slice-max-steps", type=int, default=100)
+    parser.add_argument("--slice-retain-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=128,
+        help="LoRA rank (also used for slice init when --slice-init is enabled).",
+    )
+    parser.add_argument("--slice-grad-project", action="store_true", help="Project forget gradients against retain gradients for slice init.")
+    parser.add_argument(
+        "--slice-grad-projection-mode",
+        choices=["per_module", "global"],
+        default="per_module",
+        help="Projection mode when --slice-grad-project is enabled.",
+    )
+    parser.add_argument(
+        "--slice-add-retain-grad",
+        action="store_true",
+        help="Add retain gradient after projection when --slice-grad-project is enabled.",
+    )
+    parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
+
+    set_global_seed(args.seed)
+
+    # Configure logging so slice and cache logs are visible
+    try:
+        lvl = getattr(logging, args.log_level.upper(), logging.INFO)
+    except Exception:
+        lvl = logging.INFO
+    # basicConfig is a no-op if handlers are already set up; force=True makes this reliable.
+    try:
+        logging.basicConfig(
+            level=lvl,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            force=True,
+        )
+    except TypeError:
+        logging.basicConfig(level=lvl, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    # Ensure our package loggers follow the requested level.
+    logging.getLogger("cl_lora").setLevel(lvl)
+    logging.getLogger("cl_lora.slice").setLevel(lvl)
+    # Reduce verbosity of very chatty third-party libraries by default
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+    logging.getLogger("peft").setLevel(logging.WARNING)
 
     general_eval_keys = (
         CORE_EVAL_TASKS if args.general_eval_set == "core" else list(GENERAL_EVAL_TASKS.keys())
@@ -221,8 +429,21 @@ def main() -> None:
     run_output_dir = Path(args.output_root) / args.sequence / run_name
     train_output_dir = Path(args.train_output_root)
 
+    orchestrator_config = {
+        "entrypoint": "cl_lora.orchestrator",
+        "created_at": datetime.now().isoformat(),
+        "cli_args": vars(args),
+        "defaults": {
+            "train_on_task": _collect_fn_defaults(train_on_task),
+            "load_base_model": _collect_fn_defaults(load_base_model),
+            "build_tokenizer": _collect_fn_defaults(build_tokenizer),
+            "evaluate_all": _collect_fn_defaults(evaluate_all),
+        },
+    }
+
     print(f"Sequence: {args.sequence}")
     print(f"General eval tasks: {general_eval_keys}")
+    print(f"Quick eval mode: {'ON (perplexity-only)' if args.quick_eval else 'OFF'}")
     print(f"Results dir: {run_output_dir}")
 
     payload = run_sequence(
@@ -231,11 +452,22 @@ def main() -> None:
         run_output_dir=run_output_dir,
         train_output_dir=train_output_dir,
         general_eval_keys=general_eval_keys,
+        seed=args.seed,
         eval_size=args.eval_size,
         task_eval_samples=args.task_eval_samples,
         task_eval_max_new_tokens=args.task_eval_max_new_tokens,
+        quick_eval=args.quick_eval,
         save_final_model=args.save_final_model,
         resume=args.resume,
+        rank=args.rank,
+        slice_enabled=args.slice_init,
+        slice_cache_dir=args.slice_cache_dir,
+        slice_max_steps=args.slice_max_steps,
+        slice_retain_scale=args.slice_retain_scale,
+        slice_grad_project=args.slice_grad_project,
+        slice_grad_projection_mode=args.slice_grad_projection_mode,
+        slice_add_retain_grad=args.slice_add_retain_grad,
+        orchestrator_config=orchestrator_config,
     )
 
     print("\n=== Final Metrics ===")

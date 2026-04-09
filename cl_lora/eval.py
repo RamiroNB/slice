@@ -4,18 +4,23 @@ import argparse
 import contextlib
 import importlib
 import json
+import math
 import re
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import torch
+from torch.utils.data import DataLoader
+from transformers import DataCollatorForLanguageModeling
 
 try:
     from .load_dataset import load_training_dataset
+    from .repro import set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS
 except ImportError:
     from load_dataset import load_training_dataset
+    from repro import set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS
 
 
@@ -340,6 +345,67 @@ def _model_device(model) -> torch.device:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _tokenize_dataset_for_perplexity(dataset, tokenizer, max_length: int):
+    return dataset.map(
+        lambda ex: tokenizer(ex["text"], truncation=True, max_length=max_length),
+        remove_columns=dataset.column_names,
+    )
+
+
+@torch.no_grad()
+def _evaluate_task_perplexity(
+    model,
+    tokenizer,
+    task,
+    *,
+    eval_size: int,
+    max_seq_length: int,
+    per_device_eval_batch_size: int,
+    task_eval_samples: int,
+    seed: int,
+) -> Dict[str, Any]:
+    _, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
+    if task_eval_samples and len(eval_dataset) > task_eval_samples:
+        eval_dataset = eval_dataset.select(range(task_eval_samples))
+    eval_dataset = _tokenize_dataset_for_perplexity(
+        eval_dataset,
+        tokenizer=tokenizer,
+        max_length=max_seq_length,
+    )
+
+    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    dataloader = DataLoader(
+        eval_dataset,
+        batch_size=per_device_eval_batch_size,
+        shuffle=False,
+        collate_fn=collator,
+    )
+
+    device = _model_device(model)
+    model.eval()
+
+    total_loss = 0.0
+    total_examples = 0
+    for batch in dataloader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        outputs = model(**batch)
+        loss = outputs.loss
+        bs = int(batch["input_ids"].shape[0])
+        total_loss += float(loss.item()) * bs
+        total_examples += bs
+
+    mean_loss = total_loss / max(1, total_examples)
+    perplexity = float(math.exp(min(mean_loss, 20.0)))
+
+    return {
+        "score": None,
+        "primary_metric": "perplexity",
+        "eval_loss": float(mean_loss),
+        "perplexity": perplexity,
+        "n_samples": int(total_examples),
+    }
+
+
 def _primary_metric_name(task: Any) -> str:
     if hasattr(task, "metric") and str(getattr(task, "metric", "")).lower() == "rouge-l":
         return "rouge_l"
@@ -420,7 +486,9 @@ def evaluate_general_tasks(
     dtype: str = "bfloat16",
     alpaca_n_samples: int = 190,
     alpaca_max_new_tokens: int = 128,
+    seed: int = 42,
 ) -> Dict[str, Any]:
+    set_global_seed(seed)
     eval_task_keys = eval_task_keys or CORE_EVAL_TASKS
     lm_eval, _ = _import_lm_eval_modules()
     with _left_padding_for_generation(tokenizer):
@@ -496,6 +564,7 @@ def evaluate_general_tasks(
                 n_samples=alpaca_n_samples,
                 batch_size=batch_size,
                 max_new_tokens=alpaca_max_new_tokens,
+                seed=seed,
             )
             ip_scores["alpaca"] = _evaluate_alpaca_rouge_l(
                 model=model,
@@ -504,6 +573,7 @@ def evaluate_general_tasks(
                 n_samples=alpaca_n_samples,
                 batch_size=batch_size,
                 max_new_tokens=alpaca_max_new_tokens,
+                seed=seed,
             )
 
         return {
@@ -560,6 +630,37 @@ def evaluate_seen_tasks(
     return out
 
 
+def evaluate_seen_tasks_perplexity(
+    model,
+    tokenizer,
+    seen_tasks,
+    eval_size: int = 200,
+    max_seq_length: int = 512,
+    per_device_eval_batch_size: int = 8,
+    task_eval_samples: int = 64,
+    seed: int = 42,
+) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+
+    for task in seen_tasks:
+        task_name = getattr(task, "name", str(task))
+        out[task_name] = _evaluate_task_perplexity(
+            model=model,
+            tokenizer=tokenizer,
+            task=task,
+            eval_size=eval_size,
+            max_seq_length=max_seq_length,
+            per_device_eval_batch_size=per_device_eval_batch_size,
+            task_eval_samples=task_eval_samples,
+            seed=seed,
+        )
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return out
+
+
 def evaluate_all(
     model,
     tokenizer,
@@ -570,24 +671,47 @@ def evaluate_all(
     eval_size: int = 200,
     task_eval_samples: int = 64,
     task_eval_max_new_tokens: int = 64,
+    quick_eval: bool = False,
+    seed: int = 42,
 ) -> Dict[str, Any]:
-    eval_keys = general_eval_task_keys or CORE_EVAL_TASKS
+    set_global_seed(seed)
+    if quick_eval:
+        seen = evaluate_seen_tasks_perplexity(
+            model=model,
+            tokenizer=tokenizer,
+            seen_tasks=seen_tasks,
+            eval_size=eval_size,
+            task_eval_samples=task_eval_samples,
+            seed=seed,
+        )
+        general = {
+            "gp": {},
+            "ip": {},
+            "gp_mean": None,
+            "ip_mean": None,
+            "mode": "quick_perplexity",
+        }
+    else:
+        eval_keys = general_eval_task_keys or CORE_EVAL_TASKS
 
-    general = evaluate_general_tasks(
-        model=model,
-        tokenizer=tokenizer,
-        eval_task_keys=eval_keys,
-        batch_size=general_eval_batch_size,
-    )
-    seen = evaluate_seen_tasks(
-        model=model,
-        tokenizer=tokenizer,
-        seen_tasks=seen_tasks,
-        output_dir=output_dir,
-        eval_size=eval_size,
-        max_new_tokens=task_eval_max_new_tokens,
-        task_eval_samples=task_eval_samples,
-    )
+        general = evaluate_general_tasks(
+            model=model,
+            tokenizer=tokenizer,
+            eval_task_keys=eval_keys,
+            batch_size=general_eval_batch_size,
+            seed=seed,
+        )
+        seen = evaluate_seen_tasks(
+            model=model,
+            tokenizer=tokenizer,
+            seen_tasks=seen_tasks,
+            output_dir=output_dir,
+            eval_size=eval_size,
+            max_new_tokens=task_eval_max_new_tokens,
+            task_eval_samples=task_eval_samples,
+            seed=seed,
+        )
+
     return {
         "general": general,
         "seen_tasks": seen,
