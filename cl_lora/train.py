@@ -5,6 +5,7 @@ import functools
 import inspect
 import json
 import os
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -91,7 +92,7 @@ def train_on_task(
     task,
     output_dir: str,
     retain_task=None,
-    rank: int = 128,
+    rank: int = 64,
     learning_rate: float = 1e-4,
     num_train_epochs: float = 3.0,
     per_device_train_batch_size: int = 8,
@@ -203,14 +204,59 @@ def train_on_task(
     merged_model = merge_fn() if callable(merge_fn) else lora_model
     trainer.save_state()
 
+    def _maybe_to_dict(obj: Any) -> Any:
+        if obj is None:
+            return None
+        if is_dataclass(obj):
+            return asdict(obj)
+        to_dict = getattr(obj, "to_dict", None)
+        if callable(to_dict):
+            try:
+                return to_dict()
+            except Exception:
+                return str(obj)
+        return str(obj)
+
+    model_cfg = getattr(model, "config", None)
+    model_name_or_path = getattr(model_cfg, "_name_or_path", None) if model_cfg is not None else None
+    if model_name_or_path is None:
+        model_name_or_path = getattr(model, "name_or_path", None)
+
+    def _to_serializable(value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {str(k): _to_serializable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_to_serializable(v) for v in value]
+        return str(value)
+
     report = {
         "task_name": getattr(task, "name", str(task)),
         "train_metrics": train_result.metrics,
         "eval_metrics": eval_metrics,
         "output_dir": str(output_path),
+        "configs": {
+            "seed": int(seed),
+            "model": {
+                "class": model.__class__.__name__,
+                "name_or_path": model_name_or_path,
+                "config": _maybe_to_dict(model_cfg),
+            },
+            "tokenizer": {
+                "class": tokenizer.__class__.__name__,
+                "name_or_path": getattr(tokenizer, "name_or_path", None),
+                "pad_token": getattr(tokenizer, "pad_token", None),
+                "eos_token": getattr(tokenizer, "eos_token", None),
+                "padding_side": getattr(tokenizer, "padding_side", None),
+            },
+            "lora": _maybe_to_dict(lora_cfg),
+            "slice": _maybe_to_dict(slice_config) if slice_enabled else None,
+            "training_args": _maybe_to_dict(training_args),
+        },
     }
     with open(output_path / "training_report.json", "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+        json.dump(_to_serializable(report), f, indent=2)
 
     del trainer
     if torch.cuda.is_available():

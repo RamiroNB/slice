@@ -3,10 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 import logging
+
+try:
+    from importlib import metadata as importlib_metadata  # py3.8+
+except Exception:  # pragma: no cover
+    import importlib_metadata  # type: ignore
 
 try:
     from .eval import evaluate_all
@@ -20,6 +26,18 @@ except ImportError:
     from repro import set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
     from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, train_on_task
+
+
+def _collect_fn_defaults(fn) -> Dict[str, Any]:
+    import inspect
+
+    sig = inspect.signature(fn)
+    out: Dict[str, Any] = {}
+    for name, param in sig.parameters.items():
+        if param.default is inspect._empty:
+            continue
+        out[name] = param.default
+    return out
 
 
 def _safe_name(name: str) -> str:
@@ -47,6 +65,67 @@ def _read_json(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+def _pkg_version(dist_name: str) -> str | None:
+    try:
+        return str(importlib_metadata.version(dist_name))
+    except Exception:
+        return None
+
+
+def _collect_env_info() -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "python": sys.version,
+        "packages": {
+            "torch": _pkg_version("torch"),
+            "transformers": _pkg_version("transformers"),
+            "accelerate": _pkg_version("accelerate"),
+            "peft": _pkg_version("peft"),
+            "datasets": _pkg_version("datasets"),
+        },
+    }
+
+    try:
+        import torch
+
+        info["cuda"] = {
+            "available": bool(torch.cuda.is_available()),
+            "device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+            "version": getattr(torch.version, "cuda", None),
+        }
+    except Exception:
+        pass
+
+    return info
+
+
+def _collect_model_info(model) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "class": model.__class__.__name__,
+        "name_or_path": getattr(getattr(model, "config", None), "_name_or_path", None)
+        or getattr(model, "name_or_path", None),
+    }
+    cfg = getattr(model, "config", None)
+    if cfg is not None and hasattr(cfg, "to_dict"):
+        try:
+            out["config"] = cfg.to_dict()
+        except Exception:
+            out["config"] = str(cfg)
+    return out
+
+
+def _collect_tokenizer_info(tokenizer) -> Dict[str, Any]:
+    return {
+        "class": tokenizer.__class__.__name__,
+        "name_or_path": getattr(tokenizer, "name_or_path", None),
+        "pad_token": getattr(tokenizer, "pad_token", None),
+        "eos_token": getattr(tokenizer, "eos_token", None),
+        "bos_token": getattr(tokenizer, "bos_token", None),
+        "unk_token": getattr(tokenizer, "unk_token", None),
+        "padding_side": getattr(tokenizer, "padding_side", None),
+        "model_max_length": getattr(tokenizer, "model_max_length", None),
+    }
+
+
 def run_sequence(
     sequence_name: str,
     model_name: str,
@@ -68,10 +147,45 @@ def run_sequence(
     slice_grad_project: bool,
     slice_grad_projection_mode: str,
     slice_add_retain_grad: bool,
+    orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
+    run_output_dir.mkdir(parents=True, exist_ok=True)
     sequence = get_sequence(sequence_name)
     task_order = [task.name for task in sequence.tasks]
+
+    resolved_cfg: Dict[str, Any] = {
+        "sequence": sequence_name,
+        "description": sequence.description,
+        "task_order": task_order,
+        "general_eval_keys": general_eval_keys,
+        "seed": seed,
+        "quick_eval": bool(quick_eval),
+        "eval_size": int(eval_size),
+        "task_eval_samples": int(task_eval_samples),
+        "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
+        "rank": int(rank),
+        "slice_enabled": bool(slice_enabled),
+        "slice_cache_dir": slice_cache_dir,
+        "slice_max_steps": int(slice_max_steps),
+        "slice_retain_scale": float(slice_retain_scale),
+        "slice_grad_project": bool(slice_grad_project),
+        "slice_grad_projection_mode": str(slice_grad_projection_mode),
+        "slice_add_retain_grad": bool(slice_add_retain_grad),
+    }
+
+    run_cfg_payload: Dict[str, Any] = {
+        "orchestrator": orchestrator_config or {},
+        "env": _collect_env_info(),
+        "resolved": resolved_cfg,
+        "model": None,
+        "tokenizer": None,
+        "notes": {
+            "hf_token_present": bool(HF_TOKEN),
+            "hf_token_redacted": True,
+        },
+    }
+    _write_json(run_output_dir / "run_config.json", run_cfg_payload)
 
     partial_path = run_output_dir / "stage_records.partial.json"
     checkpoint_root = run_output_dir / "checkpoints"
@@ -129,6 +243,10 @@ def run_sequence(
     else:
         tokenizer = build_tokenizer(model_name=model_name, hf_token=HF_TOKEN)
         model = load_base_model(model_name=model_name, hf_token=HF_TOKEN)
+
+    run_cfg_payload["model"] = _collect_model_info(model)
+    run_cfg_payload["tokenizer"] = _collect_tokenizer_info(tokenizer)
+    _write_json(run_output_dir / "run_config.json", run_cfg_payload)
 
     for idx in range(start_stage, len(sequence.tasks) + 1):
         task = sequence.tasks[idx - 1]
@@ -311,6 +429,18 @@ def main() -> None:
     run_output_dir = Path(args.output_root) / args.sequence / run_name
     train_output_dir = Path(args.train_output_root)
 
+    orchestrator_config = {
+        "entrypoint": "cl_lora.orchestrator",
+        "created_at": datetime.now().isoformat(),
+        "cli_args": vars(args),
+        "defaults": {
+            "train_on_task": _collect_fn_defaults(train_on_task),
+            "load_base_model": _collect_fn_defaults(load_base_model),
+            "build_tokenizer": _collect_fn_defaults(build_tokenizer),
+            "evaluate_all": _collect_fn_defaults(evaluate_all),
+        },
+    }
+
     print(f"Sequence: {args.sequence}")
     print(f"General eval tasks: {general_eval_keys}")
     print(f"Quick eval mode: {'ON (perplexity-only)' if args.quick_eval else 'OFF'}")
@@ -337,6 +467,7 @@ def main() -> None:
         slice_grad_project=args.slice_grad_project,
         slice_grad_projection_mode=args.slice_grad_projection_mode,
         slice_add_retain_grad=args.slice_add_retain_grad,
+        orchestrator_config=orchestrator_config,
     )
 
     print("\n=== Final Metrics ===")
