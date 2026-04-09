@@ -21,32 +21,32 @@ which is how the full filenames below were resolved.
 
   NI-ID  | Source (Table 4)                        | Full task name
   --------|------------------------------------------|------------------------------------------
-  NI002   | Quoref (QA)                             | task002_quoref_answer_generation (*)
-  NI024   | CosmosQA (QA)                           | task024_cosmosqa_answer_generation (*)
-  NI141   | Odd-man-out (Word Semantics)            | task141_odd-man-out_classification (*)
-  NI163   | Synthetic Program Execution             | task163_count_elements_in_set (*)
-  NI195   | Sentiment140 (Sentiment)                | task195_sentiment140_classification
-  NI220   | Rocstories (Title Generation)           | task220_rocstories_title_classification (*)
-  NI224   | Scruples (Ethics Classification)        | task224_scruples_anecdotes_judgment (*)
-  NI231   | IIRC (QA)                               | task231_iirc_link_exists_classification (*)
-  NI273   | Europarl (Text Matching)                | task273_europarl_translation (*)
-  NI292   | StoryCommonsense (Info Extraction)      | task292_storycommonsense_character_text_generation (*)
-  NI339   | ReCoRD (QA)                             | task339_record_answer_generation (*)
-  NI360   | Numersense (Fill-in-blank)              | task360_columbia_filled_in_blank_classification (*)
-  NI363   | SST2 (Sentiment)                        | task363_sst2_polarity_classification
-  NI488   | Synthetic Program Execution             | task488_extract_list_elements (*)
-  NI511   | Reddit TIFU (Summarization)             | task511_reddit_tifu_long_text_summarization (*)
-  NI589   | Amazon Fine Food Reviews (Summarization)| task589_amazonfood_summary_text_generation (*)
-  NI611   | Mutual (Dialogue)                       | task611_mutual_multi_choice_in_context (*)
-  NI618   | Multilingual Amazon Reviews (Summary)   | task618_amazonreview_summary_text_generation (*)
-  NI619   | OhSUMED (Title Generation)              | task619_ohsumed_abstract_title_generation (*)
-  NI1290  | XSum (Summarization)                    | task1290_xsum_summarization (*)
-  NI1292  | Yelp Review Full (Sentiment)            | task1292_yelpreviews_polarity_classification (*)
-  NI1310  | Multilingual Amazon Reviews (Sentiment) | task1310_amazonreview_rating_classification (*)
-  NI1343  | Amazon US Reviews (Sentiment)           | task1343_amazonus_review_rating_classification (*)
-  NI1355  | Sentence Compression (Summarization)   | task1355_sent_comp_summarization (*)
-  NI1357  | XLSum (Summarization)                  | task1357_xlsum_title_generation (*)
-  NI1510  | Evalution (Info Extraction)             | task1510_evalution_relation_prop_extraction (*)
+  NI002   | Quoref (QA)                             | task002_quoref_answer_generation (*) - ok 
+  NI024   | CosmosQA (QA)                           | task024_cosmosqa_answer_generation (*) - ok 
+  NI141   | Odd-man-out (Word Semantics)            | task141_odd-man-out_classification (*) - ok 
+  NI163   | Synthetic Program Execution             | task163_count_words_ending_with_letter (*) - not found: task163_count_words_ending_with_letter.json  
+  NI195   | Sentiment140 (Sentiment)                | task195_sentiment140_classification - ok
+  NI220   | Rocstories (Title Generation)           | task220_rocstories_title_classification (*) - ok
+  NI224   | Scruples (Ethics Classification)        | task224_scruples_anecdotes_ethical_judgment (*) - not found: task224_scruples_anecdotes_ethical_judgment.json  
+  NI231   | IIRC (QA)                               | task231_iirc_link_classification (*) - not found: task231_iirc_link_classification.json
+  NI273   | Europarl (Text Matching)                | task273_europarl_classification (*) - not found: task273_europarl_classification.json
+  NI292   | StoryCommonsense (Info Extraction)      | task292_storycommonsense_character_text_generation (*) - ok 
+  NI339   | ReCoRD (QA)                             | task339_record_answer_generation (*) - ok
+  NI360   | Numersense (Fill-in-blank)              | task360_spolin_yesand_response_generation (*) - not found: task360_spolin_yesand_response_generation.json
+  NI363   | SST2 (Sentiment)                        | task363_sst2_polarity_classification - ok 
+  NI488   | Synthetic Program Execution             | task448_opus_paracrawl_en_tl_translation (*) - not found: task448_opus_paracrawl_en_tl_translation.json
+  NI511   | Reddit TIFU (Summarization)             | task511_reddit_tifu_long_text_summarization (*) - ok
+  NI589   | Amazon Fine Food Reviews (Summarization)| task589_amazonfood_summary_text_generation (*) - ok
+  NI611   | Mutual (Dialogue)                       | task611_mutual_multi_turn_dialogue (*) - not found: task611_mutual_multi_turn_dialogue.json
+  NI618   | Multilingual Amazon Reviews (Summary)   | task618_amazonreview_summary_text_generation (*) - ok
+  NI619   | OhSUMED (Title Generation)              | task619_ohsumed_abstract_title_generation (*) - ok
+  NI1290  | XSum (Summarization)                    | task1290_xsum_summarization (*) - ok
+  NI1292  | Yelp Review Full (Sentiment)            | task1292_yelp_review_full_text_categorization (*) - not found: task1292_yelp_review_full_text_categorization.json
+  NI1310  | Multilingual Amazon Reviews (Sentiment) | task1310_amazonreview_rating_classification (*) - ok 
+  NI1343  | Amazon US Reviews (Sentiment)           | task1343_amazon_us_reviews_rating (*) - not found: task1343_amazon_us_reviews_rating.json
+  NI1355  | Sentence Compression (Summarization)   | task1355_sent_comp_summarization (*) - ok 
+  NI1357  | XLSum (Summarization)                  | task1357_xlsum_summary_generation (*) - not found: task1357_xlsum_summary_generation.json
+  NI1510  | Evalution (Info Extraction)             | task1510_evalution_relation_extraction (*) - not found: task1510_evalution_relation_extraction.json
 
   (*) = resolved from paper Table 4 source name + natural-instructions naming convention.
         Verify these against the repo before running if exact match matters.
@@ -125,12 +125,14 @@ NI195 = SuperNITask(
     category="classification",
     hf_config="task195_sentiment140_classification",
 )
+
+
 NI1343 = SuperNITask(
     ni_id="NI1343",
-    name="task1343_amazonus_review_rating_classification",
+    name="task1343_amazon_us_reviews_rating",
     source="Amazon US Reviews",
     category="classification",
-    hf_config="task1343_amazonus_review_rating_classification",
+    hf_config="task1343_amazon_us_reviews_rating",
 )
 NI1310 = SuperNITask(
     ni_id="NI1310",
@@ -139,12 +141,13 @@ NI1310 = SuperNITask(
     category="classification",
     hf_config="task1310_amazonreview_rating_classification",
 )
+
 NI1292 = SuperNITask(
     ni_id="NI1292",
-    name="task1292_yelpreviews_polarity_classification",
+    name="task1292_yelp_review_full_text_categorization",
     source="Yelp Review Full",
     category="classification",
-    hf_config="task1292_yelpreviews_polarity_classification",
+    hf_config="task1292_yelp_review_full_text_categorization",
 )
 NI363 = SuperNITask(
     ni_id="NI363",
@@ -153,12 +156,13 @@ NI363 = SuperNITask(
     category="classification",
     hf_config="task363_sst2_polarity_classification",
 )
+
 NI231 = SuperNITask(
     ni_id="NI231",
-    name="task231_iirc_link_exists_classification",
+    name="task231_iirc_link_classification",
     source="IIRC",
     category="classification",
-    hf_config="task231_iirc_link_exists_classification",
+    hf_config="task231_iirc_link_classification",
 )
 NI220 = SuperNITask(
     ni_id="NI220",
@@ -167,29 +171,33 @@ NI220 = SuperNITask(
     category="classification",
     hf_config="task220_rocstories_title_classification",
 )
+
 NI224 = SuperNITask(
     ni_id="NI224",
-    name="task224_scruples_anecdotes_judgment",
+    name="task224_scruples_anecdotes_ethical_judgment",
     source="Scruples",
     category="classification",
-    hf_config="task224_scruples_anecdotes_judgment",
+    hf_config="task224_scruples_anecdotes_ethical_judgment",
 )
+
 NI273 = SuperNITask(
     ni_id="NI273",
-    name="task273_europarl_translation",
+    name="task273_europarl_classification",
     source="Europarl",
     category="classification",
-    hf_config="task273_europarl_translation",
+    hf_config="task273_europarl_classification",
 )
+
 NI360 = SuperNITask(
     ni_id="NI360",
-    name="task360_columbia_filled_in_blank_classification",
+    name="task360_spolin_yesand_response_generation",
     source="Numersense",
     category="classification",
-    hf_config="task360_columbia_filled_in_blank_classification",
+    hf_config="task360_spolin_yesand_response_generation",
 )
 
 # --- Generation tasks ---
+
 NI618 = SuperNITask(
     ni_id="NI618",
     name="task618_amazonreview_summary_text_generation",
@@ -204,6 +212,7 @@ NI1290 = SuperNITask(
     category="generation",
     hf_config="task1290_xsum_summarization",
 )
+
 NI589 = SuperNITask(
     ni_id="NI589",
     name="task589_amazonfood_summary_text_generation",
@@ -211,6 +220,7 @@ NI589 = SuperNITask(
     category="generation",
     hf_config="task589_amazonfood_summary_text_generation",
 )
+
 NI511 = SuperNITask(
     ni_id="NI511",
     name="task511_reddit_tifu_long_text_summarization",
@@ -218,12 +228,13 @@ NI511 = SuperNITask(
     category="generation",
     hf_config="task511_reddit_tifu_long_text_summarization",
 )
+
 NI1357 = SuperNITask(
     ni_id="NI1357",
-    name="task1357_xlsum_title_generation",
+    name="task1357_xlsum_summary_generation",
     source="XLSum",
     category="generation",
-    hf_config="task1357_xlsum_title_generation",
+    hf_config="task1357_xlsum_summary_generation",
 )
 NI1355 = SuperNITask(
     ni_id="NI1355",
@@ -239,6 +250,7 @@ NI141 = SuperNITask(
     category="generation",
     hf_config="task141_odd-man-out_classification",
 )
+
 NI619 = SuperNITask(
     ni_id="NI619",
     name="task619_ohsumed_abstract_title_generation",
@@ -246,12 +258,13 @@ NI619 = SuperNITask(
     category="generation",
     hf_config="task619_ohsumed_abstract_title_generation",
 )
+
 NI163 = SuperNITask(
     ni_id="NI163",
-    name="task163_count_elements_in_set",
+    name="task163_count_words_ending_with_letter",
     source="Synthetic Program Execution",
     category="generation",
-    hf_config="task163_count_elements_in_set",
+    hf_config="task163_count_words_ending_with_letter",
 )
 NI002 = SuperNITask(
     ni_id="NI002",
@@ -269,19 +282,21 @@ NI339 = SuperNITask(
     category="generation",
     hf_config="task339_record_answer_generation",
 )
+
 NI1510 = SuperNITask(
     ni_id="NI1510",
-    name="task1510_evalution_relation_prop_extraction",
+    name="task1510_evalution_relation_extraction",
     source="Evalution",
     category="classification",
-    hf_config="task1510_evalution_relation_prop_extraction",
+    hf_config="task1510_evalution_relation_extraction",
 )
+
 NI611 = SuperNITask(
     ni_id="NI611",
-    name="task611_mutual_multi_choice_in_context",
+    name="task611_mutual_multi_turn_dialogue",
     source="Mutual",
     category="generation",
-    hf_config="task611_mutual_multi_choice_in_context",
+    hf_config="task611_mutual_multi_turn_dialogue",
 )
 NI292 = SuperNITask(
     ni_id="NI292",
@@ -290,12 +305,13 @@ NI292 = SuperNITask(
     category="generation",
     hf_config="task292_storycommonsense_character_text_generation",
 )
+
 NI488 = SuperNITask(
     ni_id="NI488",
-    name="task488_extract_list_elements",
+    name="task448_opus_paracrawl_en_tl_translation",
     source="Synthetic Program Execution",
     category="generation",
-    hf_config="task488_extract_list_elements",
+    hf_config="task448_opus_paracrawl_en_tl_translation",
 )
 NI024 = SuperNITask(
     ni_id="NI024",
