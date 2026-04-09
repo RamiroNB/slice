@@ -11,11 +11,13 @@ import logging
 try:
     from .eval import evaluate_all
     from .metrics import compute_cl_metrics
+    from .repro import set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
     from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, train_on_task
 except ImportError:
     from eval import evaluate_all
     from metrics import compute_cl_metrics
+    from repro import set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
     from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, train_on_task
 
@@ -51,6 +53,7 @@ def run_sequence(
     run_output_dir: Path,
     train_output_dir: Path,
     general_eval_keys: List[str],
+    seed: int,
     eval_size: int,
     task_eval_samples: int,
     task_eval_max_new_tokens: int,
@@ -66,6 +69,7 @@ def run_sequence(
     slice_grad_projection_mode: str,
     slice_add_retain_grad: bool,
 ) -> Dict[str, Any]:
+    set_global_seed(seed)
     sequence = get_sequence(sequence_name)
     task_order = [task.name for task in sequence.tasks]
 
@@ -151,6 +155,7 @@ def run_sequence(
             task=task,
             output_dir=str(stage_train_dir),
             eval_size=eval_size,
+            seed=seed,
             retain_task=retain_task,
             rank=rank,
             slice_enabled=slice_enabled,
@@ -174,6 +179,7 @@ def run_sequence(
             task_eval_samples=task_eval_samples,
             task_eval_max_new_tokens=task_eval_max_new_tokens,
             quick_eval=quick_eval,
+            seed=seed,
         )
 
         stage_record = {
@@ -242,6 +248,7 @@ def main() -> None:
         help="Perplexity-only seen-task evaluation (skips GP/IP and generation-based seen-task metrics).",
     )
     parser.add_argument("--eval-size", type=int, default=200)
+    parser.add_argument("--seed", type=int, default=42, help="Global RNG seed for reproducibility.")
     parser.add_argument("--task-eval-samples", type=int, default=64)
     parser.add_argument("--task-eval-max-new-tokens", type=int, default=64)
     parser.add_argument("--run-name", default=None)
@@ -271,6 +278,8 @@ def main() -> None:
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
+
+    set_global_seed(args.seed)
 
     # Configure logging so slice and cache logs are visible
     try:
@@ -313,6 +322,7 @@ def main() -> None:
         run_output_dir=run_output_dir,
         train_output_dir=train_output_dir,
         general_eval_keys=general_eval_keys,
+        seed=args.seed,
         eval_size=args.eval_size,
         task_eval_samples=args.task_eval_samples,
         task_eval_max_new_tokens=args.task_eval_max_new_tokens,

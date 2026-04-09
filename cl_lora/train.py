@@ -24,10 +24,12 @@ import logging
 try:
     from .load_dataset import load_training_dataset
     from .lora_config import build_lora_config
+    from .repro import set_global_seed
     from .slice import SliceInitConfig, initialize_lora_with_slice
 except ImportError:
     from load_dataset import load_training_dataset
     from lora_config import build_lora_config
+    from repro import set_global_seed
     from slice import SliceInitConfig, initialize_lora_with_slice
 
 
@@ -117,6 +119,7 @@ def train_on_task(
     Returns:
         (merged_model, training_report)
     """
+    set_global_seed(seed)
     train_dataset, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
     train_dataset = _tokenize_dataset(train_dataset, tokenizer=tokenizer, max_length=max_seq_length)
     eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
@@ -227,6 +230,7 @@ def main() -> None:
     parser.add_argument("--model-name", default=MODEL_NAME)
     parser.add_argument("--output-dir", default="outputs/single_task")
     parser.add_argument("--save-merged-model", action="store_true")
+    parser.add_argument("--seed", type=int, default=42, help="Global RNG seed for reproducibility.")
     parser.add_argument(
         "--rank",
         type=int,
@@ -251,6 +255,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    set_global_seed(args.seed)
+
     tokenizer = build_tokenizer(model_name=args.model_name, hf_token=HF_TOKEN)
     model = load_base_model(model_name=args.model_name, hf_token=HF_TOKEN)
 
@@ -260,6 +266,7 @@ def main() -> None:
         task=args.task,
         output_dir=args.output_dir,
         retain_task=args.retain_task,
+        seed=args.seed,
         rank=args.rank,
         slice_enabled=args.slice_init,
         slice_cache_dir=args.slice_cache_dir,

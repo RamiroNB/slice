@@ -16,9 +16,11 @@ from transformers import DataCollatorForLanguageModeling
 
 try:
     from .load_dataset import load_training_dataset
+    from .repro import set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS
 except ImportError:
     from load_dataset import load_training_dataset
+    from repro import set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS
 
 
@@ -484,7 +486,9 @@ def evaluate_general_tasks(
     dtype: str = "bfloat16",
     alpaca_n_samples: int = 190,
     alpaca_max_new_tokens: int = 128,
+    seed: int = 42,
 ) -> Dict[str, Any]:
+    set_global_seed(seed)
     eval_task_keys = eval_task_keys or CORE_EVAL_TASKS
     lm_eval, _ = _import_lm_eval_modules()
     with _left_padding_for_generation(tokenizer):
@@ -560,6 +564,7 @@ def evaluate_general_tasks(
                 n_samples=alpaca_n_samples,
                 batch_size=batch_size,
                 max_new_tokens=alpaca_max_new_tokens,
+                seed=seed,
             )
             ip_scores["alpaca"] = _evaluate_alpaca_rouge_l(
                 model=model,
@@ -568,6 +573,7 @@ def evaluate_general_tasks(
                 n_samples=alpaca_n_samples,
                 batch_size=batch_size,
                 max_new_tokens=alpaca_max_new_tokens,
+                seed=seed,
             )
 
         return {
@@ -666,7 +672,9 @@ def evaluate_all(
     task_eval_samples: int = 64,
     task_eval_max_new_tokens: int = 64,
     quick_eval: bool = False,
+    seed: int = 42,
 ) -> Dict[str, Any]:
+    set_global_seed(seed)
     if quick_eval:
         seen = evaluate_seen_tasks_perplexity(
             model=model,
@@ -674,6 +682,7 @@ def evaluate_all(
             seen_tasks=seen_tasks,
             eval_size=eval_size,
             task_eval_samples=task_eval_samples,
+            seed=seed,
         )
         general = {
             "gp": {},
@@ -690,6 +699,7 @@ def evaluate_all(
             tokenizer=tokenizer,
             eval_task_keys=eval_keys,
             batch_size=general_eval_batch_size,
+            seed=seed,
         )
         seen = evaluate_seen_tasks(
             model=model,
@@ -699,6 +709,7 @@ def evaluate_all(
             eval_size=eval_size,
             max_new_tokens=task_eval_max_new_tokens,
             task_eval_samples=task_eval_samples,
+            seed=seed,
         )
 
     return {

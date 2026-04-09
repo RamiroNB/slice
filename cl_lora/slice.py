@@ -11,10 +11,12 @@ import logging
 try:
     from .lora_config import build_lora_config
     from .load_dataset import load_training_dataset
+    from .repro import set_global_seed
     from .slice_cache import SliceCacheEntry, load_slice_cache, make_cache_key, save_slice_cache
 except ImportError:
     from lora_config import build_lora_config
     from load_dataset import load_training_dataset
+    from repro import set_global_seed
     from slice_cache import SliceCacheEntry, load_slice_cache, make_cache_key, save_slice_cache
 
 
@@ -577,6 +579,7 @@ def initialize_lora_with_slice(
     *,
     config: SliceInitConfig,
 ) -> int:
+    set_global_seed(int(config.seed))
     inits = load_or_compute_slice_inits(
         model=model,
         tokenizer=tokenizer,
