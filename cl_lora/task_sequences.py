@@ -23,7 +23,7 @@ which is how the full filenames below were resolved.
   --------|------------------------------------------|------------------------------------------
   NI002   | Quoref (QA)                             | task002_quoref_answer_generation (*) - ok 
   NI024   | CosmosQA (QA)                           | task024_cosmosqa_answer_generation (*) - ok 
-  NI141   | Odd-man-out (Word Semantics)            | task141_odd-man-out_classification (*) - ok 
+  NI141   | Odd-man-out (Word Semantics)            | task141_odd-man-out_classification_category (*) - not found: task141_odd-man-out_classification_category.json
   NI163   | Synthetic Program Execution             | task163_count_words_ending_with_letter (*) - not found: task163_count_words_ending_with_letter.json  
   NI195   | Sentiment140 (Sentiment)                | task195_sentiment140_classification - ok
   NI220   | Rocstories (Title Generation)           | task220_rocstories_title_classification (*) - ok
@@ -245,10 +245,10 @@ NI1355 = SuperNITask(
 )
 NI141 = SuperNITask(
     ni_id="NI141",
-    name="task141_odd-man-out_classification",
+    name="task141_odd-man-out_classification_category",
     source="Odd-man-out",
     category="generation",
-    hf_config="task141_odd-man-out_classification",
+    hf_config="task141_odd-man-out_classification_category",
 )
 
 NI619 = SuperNITask(
