@@ -150,6 +150,7 @@ def run_sequence(
     slice_retain_batch_size: int | None = None,
     slice_retain_grad_accum: int | None = None,
     slice_retain_batch_size_set: str = "all_tasks",
+    slice_single_retain_task_mode: bool = False,
     orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
@@ -178,6 +179,7 @@ def run_sequence(
         "slice_retain_batch_size": slice_retain_batch_size,
         "slice_retain_grad_accum": slice_retain_grad_accum,
         "slice_retain_batch_size_set": slice_retain_batch_size_set,
+        "slice_single_retain_task_mode": slice_single_retain_task_mode,
     }
 
     run_cfg_payload: Dict[str, Any] = {
@@ -293,6 +295,7 @@ def run_sequence(
             slice_retain_batch_size=slice_retain_batch_size,
             slice_retain_grad_accum=slice_retain_grad_accum,
             slice_retain_batch_size_set=slice_retain_batch_size_set,
+            slice_single_retain_task_mode=slice_single_retain_task_mode,
         )
 
         seen_tasks.append(task)
@@ -410,6 +413,8 @@ def main() -> None:
     parser.add_argument("--slice-retain-batch-size-set", choices=["all_tasks", "each_task"],
         default="all_tasks",
         help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
+    parser.add_argument("--slice-single-retain-task-mode", action="store_true",
+        help="Only use the most recent previous task for retain, with same batch size as forget.")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
 
@@ -486,6 +491,7 @@ def main() -> None:
         slice_retain_batch_size=args.slice_retain_batch_size,
         slice_retain_grad_accum=args.slice_retain_grad_accum,
         slice_retain_batch_size_set=args.slice_retain_batch_size_set,
+        slice_single_retain_task_mode=args.slice_single_retain_task_mode,
         orchestrator_config=orchestrator_config,
     )
 

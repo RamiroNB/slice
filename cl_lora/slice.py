@@ -37,6 +37,7 @@ class SliceInitConfig:
     retain_batch_size: Optional[int] = None
     retain_grad_accum: Optional[int] = None
     retain_batch_size_set: str = "all_tasks"
+    single_retain_task_mode: bool = False
 
 
 logger = logging.getLogger("cl_lora.slice")
@@ -93,6 +94,14 @@ def _accumulate_gradients(
     grads: Dict[str, torch.Tensor] = {
         name: torch.zeros_like(param, device=device) for name, param in target_params.items()
     }
+
+    # PEFT freezes base weights (requires_grad=False) so backward would
+    # skip them and .grad would stay None.  Temporarily re-enable so we
+    # can collect gradients, then restore the original state.
+    saved_requires_grad = {name: p.requires_grad for name, p in target_params.items()}
+    for p in target_params.values():
+        p.requires_grad_(True)
+
     steps = 0
     model.train()
     for batch in dataloader:
@@ -104,10 +113,17 @@ def _accumulate_gradients(
         loss.backward()
         for name, param in target_params.items():
             if param.grad is None:
-                continue
+                raise RuntimeError(
+                    f"param.grad is None for {name} despite requires_grad=True. "
+                    "This should not happen — check model wiring."
+                )
             grads[name] = grads[name] + param.grad.detach()
         model.zero_grad(set_to_none=True)
         steps += 1
+
+    for name, p in target_params.items():
+        p.requires_grad_(saved_requires_grad[name])
+
     return grads, steps
 
 
@@ -189,7 +205,7 @@ def _project_forget_gradients(
 
             g_f_new = (g_f_flat + gamma * g_r_flat).view(original_shape)
             if add_retain_grad:
-                g_f_new = g_f_new + g_r.to(g_f_new.device)
+                g_f_new = g_f_new + g_r.to(device=g_f_new.device, dtype=g_f_new.dtype)
             projected[name] = g_f_new.to(g_f.dtype)
     else:
         first_name = next(iter(grads_forget.keys()))
@@ -220,7 +236,7 @@ def _project_forget_gradients(
             g_r_flat = g_r.float().view(-1).to(torch.float64)
             g_f_new = (g_f_flat + gamma * g_r_flat).view(original_shape)
             if add_retain_grad:
-                g_f_new = g_f_new + g_r.to(g_f_new.device)
+                g_f_new = g_f_new + g_r.to(device=g_f_new.device, dtype=g_f_new.dtype)
             projected[name] = g_f_new.to(g_f.dtype)
 
     return projected
@@ -276,12 +292,22 @@ def compute_slice_inits(
     grads_r = None
     steps_r = 0
     if retain_tasks:
-        retain_bs = config.retain_batch_size if config.retain_batch_size is not None else config.per_device_batch_size
-        retain_max_steps = config.retain_grad_accum if config.retain_grad_accum is not None else config.max_steps
-        logger.info(
-            "Retain tasks (%d): %s | mode=%s batch_size=%d max_steps=%d",
-            len(retain_tasks), retain_names, config.retain_batch_size_set, retain_bs, retain_max_steps,
-        )
+        if config.single_retain_task_mode:
+            retain_tasks = [retain_tasks[-1]]
+            retain_names = [getattr(retain_tasks[0], "name", str(retain_tasks[0]))]
+            retain_bs = config.per_device_batch_size
+            retain_max_steps = config.max_steps
+            logger.info(
+                "Single retain task mode: task=%s batch_size=%d max_steps=%d",
+                retain_names[0], retain_bs, retain_max_steps,
+            )
+        else:
+            retain_bs = config.retain_batch_size if config.retain_batch_size is not None else config.per_device_batch_size
+            retain_max_steps = config.retain_grad_accum if config.retain_grad_accum is not None else config.max_steps
+            logger.info(
+                "Retain tasks (%d): %s | mode=%s batch_size=%d max_steps=%d",
+                len(retain_tasks), retain_names, config.retain_batch_size_set, retain_bs, retain_max_steps,
+            )
 
         if config.retain_batch_size_set == "all_tasks":
             all_retain_ds = []
@@ -415,6 +441,7 @@ def load_or_compute_slice_inits(
         "retain_batch_size": config.retain_batch_size,
         "retain_grad_accum": config.retain_grad_accum,
         "retain_batch_size_set": config.retain_batch_size_set,
+        "single_retain_task_mode": config.single_retain_task_mode,
         "lora": lora_payload,
         "model": {
             "class": model.__class__.__name__,
@@ -555,41 +582,49 @@ def apply_slice_inits(
             if not skip_absorption:
                 base_layer = None
                 if hasattr(module, "get_base_layer"):
-                    try:
-                        base_layer = module.get_base_layer()
-                    except Exception as exc:
-                        raise RuntimeError(f"Failed to get base layer for LoRA module {init_key}") from exc
+                    base_layer = module.get_base_layer()
+                if base_layer is None:
+                    raise RuntimeError(
+                        f"Cannot get base layer for LoRA module {init_key}. "
+                        "Absorption requires access to the base layer weight."
+                    )
+                base_weight = getattr(base_layer, "weight", None)
+                if not isinstance(base_weight, torch.nn.Parameter):
+                    raise RuntimeError(
+                        f"base_layer.weight is not a Parameter for {init_key} "
+                        f"(got {type(base_weight)}). Cannot perform absorption."
+                    )
 
-                base_weight = getattr(base_layer, "weight", None) if base_layer is not None else None
-                if isinstance(base_weight, torch.nn.Parameter):
-                    scaling_val = float(lora_alpha) / float(r)
-                    orig_dtype = base_weight.dtype
+                # Read the actual scaling PEFT uses in forward (accounts for rslora).
+                scaling_val = float(module.scaling["default"])
+                orig_dtype = base_weight.dtype
 
-                    weight_orig32 = base_weight.data.to(torch.float32).clone()
-                    B_mat = B_tgt.to(dtype=torch.float32)
-                    A_mat = A_tgt.to(dtype=torch.float32)
-                    offset32 = (B_mat @ A_mat) * float(scaling_val)
+                weight_orig32 = base_weight.data.to(torch.float32).clone()
+                B_mat = B_tgt.to(dtype=torch.float32)
+                A_mat = A_tgt.to(dtype=torch.float32)
+                offset32 = (B_mat @ A_mat) * float(scaling_val)
 
-                    weight32 = weight_orig32 - offset32
-                    base_weight.data.copy_(weight32.to(orig_dtype))
+                weight32 = weight_orig32 - offset32
+                base_weight.data.copy_(weight32.to(orig_dtype))
 
-                    recon32 = weight32 + offset32
-                    diff = (recon32 - weight_orig32).abs().max()
-                    tol = 1e-4 if orig_dtype in (torch.float16, torch.bfloat16) else 1e-7
-                    if diff > tol:
-                        logger.warning(
-                            "[slice] LoRA absorption diff for layer %s: max|W_frozen+DeltaW-W_orig|=%.3e (tol=%.3e)",
-                            init_key,
-                            diff.item(),
-                            tol,
-                        )
-                    else:
-                        logger.info(
-                            "[slice] LoRA absorption OK for layer %s: max|W_frozen+DeltaW-W_orig|=%.3e (tol=%.3e)",
-                            init_key,
-                            diff.item(),
-                            tol,
-                        )
+                weight_stored32 = base_weight.data.to(torch.float32)
+                recon32 = weight_stored32 + offset32
+                diff = (recon32 - weight_orig32).abs().max()
+                tol = 1e-4 if orig_dtype in (torch.float16, torch.bfloat16) else 1e-7
+                if diff > tol:
+                    logger.warning(
+                        "[slice] LoRA absorption diff for layer %s: max|W_frozen+DeltaW-W_orig|=%.3e (tol=%.3e)",
+                        init_key,
+                        diff.item(),
+                        tol,
+                    )
+                else:
+                    logger.info(
+                        "[slice] LoRA absorption OK for layer %s: max|W_frozen+DeltaW-W_orig|=%.3e (tol=%.3e)",
+                        init_key,
+                        diff.item(),
+                        tol,
+                    )
             else:
                 logger.info(
                     "[slice] Skipping LoRA absorption for layer %s due to decomposition='%s'",

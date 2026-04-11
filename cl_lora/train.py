@@ -117,6 +117,7 @@ def train_on_task(
     slice_retain_batch_size: int | None = None,
     slice_retain_grad_accum: int | None = None,
     slice_retain_batch_size_set: str = "all_tasks",
+    slice_single_retain_task_mode: bool = False,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train a fresh LoRA adapter on one task, then merge it into the model.
 
@@ -152,6 +153,7 @@ def train_on_task(
             retain_batch_size=slice_retain_batch_size,
             retain_grad_accum=slice_retain_grad_accum,
             retain_batch_size_set=slice_retain_batch_size_set,
+            single_retain_task_mode=slice_single_retain_task_mode,
         )
         # propagate PEFT lora settings into slice config when available
         try:
@@ -312,6 +314,8 @@ def main() -> None:
     parser.add_argument("--slice-retain-batch-size-set", choices=["all_tasks", "each_task"],
         default="all_tasks",
         help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
+    parser.add_argument("--slice-single-retain-task-mode", action="store_true",
+        help="Only use the most recent previous task for retain, with same batch size as forget.")
     args = parser.parse_args()
 
     set_global_seed(args.seed)
@@ -338,6 +342,7 @@ def main() -> None:
         slice_retain_batch_size=args.slice_retain_batch_size,
         slice_retain_grad_accum=args.slice_retain_grad_accum,
         slice_retain_batch_size_set=args.slice_retain_batch_size_set,
+        slice_single_retain_task_mode=args.slice_single_retain_task_mode,
     )
 
     if args.save_merged_model:
