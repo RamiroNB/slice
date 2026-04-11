@@ -147,6 +147,9 @@ def run_sequence(
     slice_grad_project: bool,
     slice_grad_projection_mode: str,
     slice_add_retain_grad: bool,
+    slice_retain_batch_size: int | None = None,
+    slice_retain_grad_accum: int | None = None,
+    slice_retain_batch_size_set: str = "all_tasks",
     orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
@@ -172,6 +175,9 @@ def run_sequence(
         "slice_grad_project": bool(slice_grad_project),
         "slice_grad_projection_mode": str(slice_grad_projection_mode),
         "slice_add_retain_grad": bool(slice_add_retain_grad),
+        "slice_retain_batch_size": slice_retain_batch_size,
+        "slice_retain_grad_accum": slice_retain_grad_accum,
+        "slice_retain_batch_size_set": slice_retain_batch_size_set,
     }
 
     run_cfg_payload: Dict[str, Any] = {
@@ -257,7 +263,7 @@ def run_sequence(
         stage_eval_dir = run_output_dir / "stages" / f"stage_{idx:02d}_{safe_task_name}"
 
         print(f"\n=== Stage {idx}/{len(sequence.tasks)} | Training task: {task_name} ===")
-        retain_task = sequence.tasks[idx - 2] if idx > 1 else None
+        retain_tasks = list(sequence.tasks[:idx - 1]) if idx > 1 else None
 
         if idx == 1:
             slice_cache_context = f"base_model:{model_name}"
@@ -274,7 +280,7 @@ def run_sequence(
             output_dir=str(stage_train_dir),
             eval_size=eval_size,
             seed=seed,
-            retain_task=retain_task,
+            retain_tasks=retain_tasks,
             rank=rank,
             slice_enabled=slice_enabled,
             slice_cache_dir=slice_cache_dir,
@@ -284,6 +290,9 @@ def run_sequence(
             slice_grad_project=slice_grad_project,
             slice_grad_projection_mode=slice_grad_projection_mode,
             slice_add_retain_grad=slice_add_retain_grad,
+            slice_retain_batch_size=slice_retain_batch_size,
+            slice_retain_grad_accum=slice_retain_grad_accum,
+            slice_retain_batch_size_set=slice_retain_batch_size_set,
         )
 
         seen_tasks.append(task)
@@ -394,6 +403,13 @@ def main() -> None:
         action="store_true",
         help="Add retain gradient after projection when --slice-grad-project is enabled.",
     )
+    parser.add_argument("--slice-retain-batch-size", type=int, default=None,
+        help="Batch size for retain gradient computation. Defaults to training batch size.")
+    parser.add_argument("--slice-retain-grad-accum", type=int, default=None,
+        help="Max accumulation steps for retain gradient. Defaults to --slice-max-steps.")
+    parser.add_argument("--slice-retain-batch-size-set", choices=["all_tasks", "each_task"],
+        default="all_tasks",
+        help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
 
@@ -467,6 +483,9 @@ def main() -> None:
         slice_grad_project=args.slice_grad_project,
         slice_grad_projection_mode=args.slice_grad_projection_mode,
         slice_add_retain_grad=args.slice_add_retain_grad,
+        slice_retain_batch_size=args.slice_retain_batch_size,
+        slice_retain_grad_accum=args.slice_retain_grad_accum,
+        slice_retain_batch_size_set=args.slice_retain_batch_size_set,
         orchestrator_config=orchestrator_config,
     )
 

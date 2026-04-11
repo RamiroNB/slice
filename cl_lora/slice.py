@@ -5,6 +5,7 @@ from typing import Dict, Iterable, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
+from datasets import concatenate_datasets
 from transformers import DataCollatorForLanguageModeling
 import logging
 
@@ -33,6 +34,9 @@ class SliceInitConfig:
     add_retain_grad: bool = False
     rank: Optional[int] = None
     max_seq_length: int = 256
+    retain_batch_size: Optional[int] = None
+    retain_grad_accum: Optional[int] = None
+    retain_batch_size_set: str = "all_tasks"
 
 
 logger = logging.getLogger("cl_lora.slice")
@@ -226,14 +230,16 @@ def compute_slice_inits(
     model: torch.nn.Module,
     tokenizer,
     forget_task,
-    retain_task=None,
+    retain_tasks=None,
     *,
     config: SliceInitConfig,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
+    retain_tasks = retain_tasks or []
+    retain_names = [getattr(rt, "name", str(rt)) for rt in retain_tasks] or None
     logger.info(
         "Starting slice init: forget=%s retain=%s max_steps=%s batch_size=%s",
         getattr(forget_task, "name", str(forget_task)),
-        getattr(retain_task, "name", str(retain_task)) if retain_task is not None else None,
+        retain_names,
         config.max_steps,
         config.per_device_batch_size,
     )
@@ -269,28 +275,51 @@ def compute_slice_inits(
         logger.debug("forget grad sample: module=%s norm=%.6g", n, float(g.norm().item()))
     grads_r = None
     steps_r = 0
-    if retain_task is not None:
-        retain_ds, _ = load_training_dataset(task=retain_task, eval_size=1, seed=config.seed)
-        retain_ds = _tokenize_dataset(
-            retain_ds,
-            tokenizer=tokenizer,
-            max_length=config.max_seq_length,
+    if retain_tasks:
+        retain_bs = config.retain_batch_size if config.retain_batch_size is not None else config.per_device_batch_size
+        retain_max_steps = config.retain_grad_accum if config.retain_grad_accum is not None else config.max_steps
+        logger.info(
+            "Retain tasks (%d): %s | mode=%s batch_size=%d max_steps=%d",
+            len(retain_tasks), retain_names, config.retain_batch_size_set, retain_bs, retain_max_steps,
         )
-        logger.info("Building retain dataloader: dataset_size=%d batch_size=%d", len(retain_ds), config.per_device_batch_size)
-        retain_loader = _build_dataloader(
-            retain_ds,
-            tokenizer=tokenizer,
-            batch_size=config.per_device_batch_size,
-            seed=config.seed,
-        )
-        grads_r, steps_r = _accumulate_gradients(
-            model=model,
-            dataloader=retain_loader,
-            target_params=target_params,
-            device=device,
-            max_steps=config.max_steps,
-        )
-        logger.info("Collected retain gradients: steps=%d modules=%d", steps_r, len(grads_r))
+
+        if config.retain_batch_size_set == "all_tasks":
+            all_retain_ds = []
+            for rt in retain_tasks:
+                ds, _ = load_training_dataset(task=rt, eval_size=1, seed=config.seed)
+                ds = _tokenize_dataset(ds, tokenizer=tokenizer, max_length=config.max_seq_length)
+                all_retain_ds.append(ds)
+            combined_ds = concatenate_datasets(all_retain_ds)
+            logger.info("Retain dataloader (all_tasks): %d total samples, batch_size=%d", len(combined_ds), retain_bs)
+            retain_loader = _build_dataloader(combined_ds, tokenizer=tokenizer, batch_size=retain_bs, seed=config.seed)
+            grads_r, steps_r = _accumulate_gradients(
+                model=model, dataloader=retain_loader, target_params=target_params,
+                device=device, max_steps=retain_max_steps,
+            )
+        elif config.retain_batch_size_set == "each_task":
+            grads_r = {name: torch.zeros_like(param, device=device) for name, param in target_params.items()}
+            steps_r = 0
+            for rt in retain_tasks:
+                rt_name = getattr(rt, "name", str(rt))
+                ds, _ = load_training_dataset(task=rt, eval_size=1, seed=config.seed)
+                ds = _tokenize_dataset(ds, tokenizer=tokenizer, max_length=config.max_seq_length)
+                logger.info("Retain dataloader (each_task): task=%s, %d samples, batch_size=%d", rt_name, len(ds), retain_bs)
+                rt_loader = _build_dataloader(ds, tokenizer=tokenizer, batch_size=retain_bs, seed=config.seed)
+                grads_rt, steps_rt = _accumulate_gradients(
+                    model=model, dataloader=rt_loader, target_params=target_params,
+                    device=device, max_steps=retain_max_steps,
+                )
+                for name in grads_r:
+                    grads_r[name] = grads_r[name] + grads_rt[name]
+                steps_r += steps_rt
+                logger.info("Accumulated retain grads for task=%s: steps=%d", rt_name, steps_rt)
+        else:
+            raise ValueError(
+                f"Unknown retain_batch_size_set: {config.retain_batch_size_set!r}. "
+                "Expected 'all_tasks' or 'each_task'."
+            )
+
+        logger.info("Collected retain gradients: total_steps=%d modules=%d", steps_r, len(grads_r))
         for i, (n, g) in enumerate(grads_r.items()):
             if i >= 5:
                 break
@@ -337,7 +366,7 @@ def load_or_compute_slice_inits(
     model: torch.nn.Module,
     tokenizer,
     forget_task,
-    retain_task,
+    retain_tasks,
     *,
     config: SliceInitConfig,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
@@ -373,7 +402,7 @@ def load_or_compute_slice_inits(
     payload = {
         "cache_context": config.cache_context,
         "forget_task": _task_fingerprint(forget_task),
-        "retain_task": _task_fingerprint(retain_task) if retain_task else None,
+        "retain_tasks": [_task_fingerprint(rt) for rt in (retain_tasks or [])] or None,
         "rank": config.rank,
         "seed": config.seed,
         "max_seq_length": config.max_seq_length,
@@ -383,6 +412,9 @@ def load_or_compute_slice_inits(
         "grad_project": config.grad_project,
         "grad_projection_mode": config.grad_projection_mode,
         "add_retain_grad": config.add_retain_grad,
+        "retain_batch_size": config.retain_batch_size,
+        "retain_grad_accum": config.retain_grad_accum,
+        "retain_batch_size_set": config.retain_batch_size_set,
         "lora": lora_payload,
         "model": {
             "class": model.__class__.__name__,
@@ -399,7 +431,7 @@ def load_or_compute_slice_inits(
         model=model,
         tokenizer=tokenizer,
         forget_task=forget_task,
-        retain_task=retain_task,
+        retain_tasks=retain_tasks,
         config=config,
     )
 
@@ -575,7 +607,7 @@ def initialize_lora_with_slice(
     model: torch.nn.Module,
     tokenizer,
     forget_task,
-    retain_task,
+    retain_tasks,
     *,
     config: SliceInitConfig,
 ) -> int:
@@ -584,7 +616,7 @@ def initialize_lora_with_slice(
         model=model,
         tokenizer=tokenizer,
         forget_task=forget_task,
-        retain_task=retain_task,
+        retain_tasks=retain_tasks,
         config=config,
     )
 

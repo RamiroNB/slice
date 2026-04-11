@@ -91,7 +91,7 @@ def train_on_task(
     tokenizer,
     task,
     output_dir: str,
-    retain_task=None,
+    retain_tasks=None,
     rank: int = 64,
     learning_rate: float = 1e-4,
     num_train_epochs: float = 3.0,
@@ -114,6 +114,9 @@ def train_on_task(
     slice_grad_projection_mode: str = "per_module",
     slice_add_retain_grad: bool = False,
     slice_cache_context: str | None = None,
+    slice_retain_batch_size: int | None = None,
+    slice_retain_grad_accum: int | None = None,
+    slice_retain_batch_size_set: str = "all_tasks",
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train a fresh LoRA adapter on one task, then merge it into the model.
 
@@ -146,6 +149,9 @@ def train_on_task(
             add_retain_grad=slice_add_retain_grad,
             rank=rank,
             max_seq_length=max_seq_length,
+            retain_batch_size=slice_retain_batch_size,
+            retain_grad_accum=slice_retain_grad_accum,
+            retain_batch_size_set=slice_retain_batch_size_set,
         )
         # propagate PEFT lora settings into slice config when available
         try:
@@ -157,7 +163,7 @@ def train_on_task(
             model=lora_model,
             tokenizer=tokenizer,
             forget_task=task,
-            retain_task=retain_task,
+            retain_tasks=retain_tasks,
             config=slice_config,
         )
         logger.info("Slice init applied: num_modules_written=%d", int(num_written))
@@ -299,6 +305,13 @@ def main() -> None:
         action="store_true",
         help="Add retain gradient after projection when --slice-grad-project is enabled.",
     )
+    parser.add_argument("--slice-retain-batch-size", type=int, default=None,
+        help="Batch size for retain gradient computation. Defaults to training batch size.")
+    parser.add_argument("--slice-retain-grad-accum", type=int, default=None,
+        help="Max accumulation steps for retain gradient. Defaults to --slice-max-steps.")
+    parser.add_argument("--slice-retain-batch-size-set", choices=["all_tasks", "each_task"],
+        default="all_tasks",
+        help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
     args = parser.parse_args()
 
     set_global_seed(args.seed)
@@ -306,12 +319,13 @@ def main() -> None:
     tokenizer = build_tokenizer(model_name=args.model_name, hf_token=HF_TOKEN)
     model = load_base_model(model_name=args.model_name, hf_token=HF_TOKEN)
 
+    retain_tasks = [args.retain_task] if args.retain_task else None
     merged_model, report = train_on_task(
         model=model,
         tokenizer=tokenizer,
         task=args.task,
         output_dir=args.output_dir,
-        retain_task=args.retain_task,
+        retain_tasks=retain_tasks,
         seed=args.seed,
         rank=args.rank,
         slice_enabled=args.slice_init,
@@ -321,6 +335,9 @@ def main() -> None:
         slice_grad_project=args.slice_grad_project,
         slice_grad_projection_mode=args.slice_grad_projection_mode,
         slice_add_retain_grad=args.slice_add_retain_grad,
+        slice_retain_batch_size=args.slice_retain_batch_size,
+        slice_retain_grad_accum=args.slice_retain_grad_accum,
+        slice_retain_batch_size_set=args.slice_retain_batch_size_set,
     )
 
     if args.save_merged_model:
