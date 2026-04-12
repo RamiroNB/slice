@@ -47,7 +47,6 @@ run_sequence() {
       --task-eval-max-new-tokens "${TASK_EVAL_MAX_NEW_TOKENS}" \
       --run-name "${run_name}" \
       --rank "${RANK}" \
-      --quick-eval \
       "${EXTRA_ARGS[@]}"
 }
 

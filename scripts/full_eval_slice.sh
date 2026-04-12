@@ -60,12 +60,11 @@ run_sequence() {
             --slice-grad-project \
             --slice-grad-projection-mode "${SLICE_GRAD_PROJECTION_MODE}" \
             --slice-retain-batch-size-set each_task \
-            --slice-max-steps 8 \
+            --slice-max-steps 2 \
             --slice-grad-project \
             --slice-retain-batch-size-set each_task \
             --general-eval-strategy final_only \
             --seen-eval-strategy diagonal_final \
-            --log-level "${LOG_LEVEL}" \
             "${EXTRA_ARGS[@]}"
 }
 
