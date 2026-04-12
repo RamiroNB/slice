@@ -60,7 +60,7 @@ run_sequence() {
             --slice-grad-project \
             --slice-grad-projection-mode "${SLICE_GRAD_PROJECTION_MODE}" \
             --slice-retain-batch-size-set each_task \
-            --slice-retain-grad-accum 8 \
+            --slice-max-steps 8 \
             --slice-grad-project \
             --slice-retain-batch-size-set each_task \
             --log-level "${LOG_LEVEL}" \
@@ -68,6 +68,6 @@ run_sequence() {
             "${EXTRA_ARGS[@]}"
 }
 
-run_sequence "NI-Seq-G1" "each_task_${RUN_PREFIX}_ni_seq_g1_${RUN_SUFFIX}"
-run_sequence "NI-Seq-G2" "each_task_${RUN_PREFIX}_ni_seq_g2_${RUN_SUFFIX}"
-run_sequence "TRACE" "each_task_${RUN_PREFIX}_trace_r${RANK}_${RUN_SUFFIX}"
+run_sequence "NI-Seq-G1" "each_task3_${RUN_PREFIX}_ni_seq_g1_${RUN_SUFFIX}"
+# run_sequence "NI-Seq-G2" "each_task3_${RUN_PREFIX}_ni_seq_g2_${RUN_SUFFIX}"
+run_sequence "TRACE" "each_task3_${RUN_PREFIX}_trace_r${RANK}_${RUN_SUFFIX}"
