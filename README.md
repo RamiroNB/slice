@@ -83,8 +83,17 @@ Resume an interrupted run:
 ## Slice LoRA Initialization
 
 The slice initializer performs a backward pass over the current task data
-and (optionally) the previous task to seed LoRA A/B matrices. It reuses the
-same collator used in training and caches initializations per task pair.
+and all previously seen tasks (retain tasks) to seed LoRA A/B matrices.
+At task t, the retain gradient is constructed using data from all tasks < t.
+Initializations are cached per task set and config.
+
+### Retain batch size modes
+
+- `--slice-retain-batch-size`: Batch size for retain gradient computation. Defaults to the training batch size.
+- `--slice-retain-grad-accum`: Max gradient accumulation steps for retain. Defaults to `--slice-max-steps`.
+- `--slice-retain-batch-size-set`: Controls how batch size is distributed across retain tasks:
+  - `all_tasks` (default): All retain task datasets are concatenated into one dataloader with total batch size = `--slice-retain-batch-size`.
+  - `each_task`: A separate dataloader is built per retain task, each with batch size = `--slice-retain-batch-size`. Effective total batch size = `batch_size * n_retain_tasks`.
 
 Example (continual run with slice-no-proj init enabled):
 
@@ -101,7 +110,7 @@ CUDA_VISIBLE_DEVICES=1 python -m cl_lora.orchestrator \
 	--slice-max-steps 64 \
 	--slice-retain-scale 1.0
 ```
-Example (continual run with slice-projected init enabled):
+Example (continual run with slice-projected init, per-task retain batching):
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 python -m cl_lora.orchestrator \
@@ -114,9 +123,11 @@ CUDA_VISIBLE_DEVICES=1 python -m cl_lora.orchestrator \
 	--slice-init \
 	--slice-cache-dir slice_cache \
 	--slice-max-steps 64 \
-	--slice-rank 8 \
 	--slice-grad-project \
 	--slice-grad-projection-mode per_module \
+	--slice-retain-batch-size 32 \
+	--slice-retain-grad-accum 50 \
+	--slice-retain-batch-size-set each_task \
 	--log-level DEBUG
 ```
 
