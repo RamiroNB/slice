@@ -384,6 +384,8 @@ def _evaluate_task_perplexity(
         batch_size=per_device_eval_batch_size,
         shuffle=False,
         collate_fn=collator,
+        num_workers=4,
+        pin_memory=True,
     )
 
     device = _model_device(model)
@@ -682,10 +684,20 @@ def evaluate_all(
 ) -> Dict[str, Any]:
     set_global_seed(seed)
 
-    # -- seen-task evaluation --
+    # Try to compile the model for faster repeated forward passes.
+    # The compiled wrapper shares parameters with the original model
+    # and is discarded when this function returns.
+    eval_model = model
+    if hasattr(torch, "compile"):
+        try:
+            eval_model = torch.compile(model)
+        except Exception:
+            eval_model = model
+
+    # -- seen-task evaluation (uses compiled model) --
     if quick_eval:
         seen = evaluate_seen_tasks_perplexity(
-            model=model,
+            model=eval_model,
             tokenizer=tokenizer,
             seen_tasks=seen_tasks,
             eval_size=eval_size,
@@ -694,7 +706,7 @@ def evaluate_all(
         )
     else:
         seen = evaluate_seen_tasks(
-            model=model,
+            model=eval_model,
             tokenizer=tokenizer,
             seen_tasks=seen_tasks,
             output_dir=output_dir,
@@ -704,7 +716,7 @@ def evaluate_all(
             seed=seed,
         )
 
-    # -- general evaluation --
+    # -- general evaluation (original model for lm-eval HFLM compat) --
     if quick_eval or skip_general_eval:
         general = {
             "gp": {},
