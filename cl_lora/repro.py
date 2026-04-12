@@ -50,6 +50,10 @@ def set_global_seed(
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+            # TF32 gives ~3x faster matmuls on Ampere+ GPUs with
+            # negligible precision loss (intermediate products only).
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         if deterministic:
             try:

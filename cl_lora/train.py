@@ -71,12 +71,17 @@ def load_base_model(
     torch_dtype: torch.dtype = torch.bfloat16,
     device_map: str = "auto",
 ):
-    return AutoModelForCausalLM.from_pretrained(
-        model_name,
+    kwargs: dict = dict(
         torch_dtype=torch_dtype,
         device_map=device_map,
         token=hf_token,
     )
+    try:
+        import flash_attn  # noqa: F401
+        kwargs["attn_implementation"] = "flash_attention_2"
+    except ImportError:
+        pass
+    return AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
 
 
 def _tokenize_dataset(dataset, tokenizer, max_length: int):
@@ -187,6 +192,7 @@ def train_on_task(
         eval_strategy="steps",
         eval_steps=eval_steps,
         bf16=use_bf16,
+        dataloader_num_workers=2,
         report_to="none",
         remove_unused_columns=True,
         seed=seed,
