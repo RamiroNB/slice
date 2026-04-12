@@ -677,9 +677,12 @@ def evaluate_all(
     task_eval_samples: int = 64,
     task_eval_max_new_tokens: int = 64,
     quick_eval: bool = False,
+    skip_general_eval: bool = False,
     seed: int = 42,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
+
+    # -- seen-task evaluation --
     if quick_eval:
         seen = evaluate_seen_tasks_perplexity(
             model=model,
@@ -689,23 +692,7 @@ def evaluate_all(
             task_eval_samples=task_eval_samples,
             seed=seed,
         )
-        general = {
-            "gp": {},
-            "ip": {},
-            "gp_mean": None,
-            "ip_mean": None,
-            "mode": "quick_perplexity",
-        }
     else:
-        eval_keys = general_eval_task_keys or CORE_EVAL_TASKS
-
-        general = evaluate_general_tasks(
-            model=model,
-            tokenizer=tokenizer,
-            eval_task_keys=eval_keys,
-            batch_size=general_eval_batch_size,
-            seed=seed,
-        )
         seen = evaluate_seen_tasks(
             model=model,
             tokenizer=tokenizer,
@@ -714,6 +701,25 @@ def evaluate_all(
             eval_size=eval_size,
             max_new_tokens=task_eval_max_new_tokens,
             task_eval_samples=task_eval_samples,
+            seed=seed,
+        )
+
+    # -- general evaluation --
+    if quick_eval or skip_general_eval:
+        general = {
+            "gp": {},
+            "ip": {},
+            "gp_mean": None,
+            "ip_mean": None,
+            "mode": "quick_perplexity" if quick_eval else "skipped",
+        }
+    else:
+        eval_keys = general_eval_task_keys or CORE_EVAL_TASKS
+        general = evaluate_general_tasks(
+            model=model,
+            tokenizer=tokenizer,
+            eval_task_keys=eval_keys,
+            batch_size=general_eval_batch_size,
             seed=seed,
         )
 

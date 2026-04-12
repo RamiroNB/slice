@@ -153,6 +153,8 @@ def run_sequence(
     slice_retain_batch_size_set: str = "all_tasks",
     slice_single_retain_task_mode: bool = False,
     keep_all_checkpoints: bool = False,
+    general_eval_strategy: str = "every_stage",
+    seen_eval_strategy: str = "full_matrix",
     orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
@@ -183,6 +185,8 @@ def run_sequence(
         "slice_retain_batch_size_set": slice_retain_batch_size_set,
         "slice_single_retain_task_mode": slice_single_retain_task_mode,
         "keep_all_checkpoints": keep_all_checkpoints,
+        "general_eval_strategy": general_eval_strategy,
+        "seen_eval_strategy": seen_eval_strategy,
     }
 
     run_cfg_payload: Dict[str, Any] = {
@@ -302,16 +306,32 @@ def run_sequence(
         )
 
         seen_tasks.append(task)
+
+        is_final_stage = (idx == len(sequence.tasks))
+
+        # Decide which seen tasks to evaluate at this stage.
+        if seen_eval_strategy == "diagonal_final" and not is_final_stage:
+            eval_seen = [task]
+            print(f"  Seen-task eval: diagonal only ({task_name})")
+        else:
+            eval_seen = list(seen_tasks)
+
+        # Decide whether to run general (GP/IP) evaluation.
+        skip_general = (general_eval_strategy == "final_only" and not is_final_stage)
+        if skip_general:
+            print(f"  Skipping general eval (strategy=final_only)")
+
         evaluation = evaluate_all(
             model=model,
             tokenizer=tokenizer,
-            seen_tasks=seen_tasks,
+            seen_tasks=eval_seen,
             output_dir=str(stage_eval_dir),
             general_eval_task_keys=general_eval_keys,
             eval_size=eval_size,
             task_eval_samples=task_eval_samples,
             task_eval_max_new_tokens=task_eval_max_new_tokens,
             quick_eval=quick_eval,
+            skip_general_eval=skip_general,
             seed=seed,
         )
 
@@ -430,6 +450,13 @@ def main() -> None:
         help="Only use the most recent previous task for retain, with same batch size as forget.")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
         help="Keep all intermediate stage checkpoints. By default only the latest is kept.")
+    parser.add_argument("--general-eval-strategy", choices=["every_stage", "final_only"],
+        default="every_stage",
+        help="When to run general (GP/IP) eval. 'final_only' skips it at intermediate stages.")
+    parser.add_argument("--seen-eval-strategy", choices=["full_matrix", "diagonal_final"],
+        default="full_matrix",
+        help="Seen-task eval: 'diagonal_final' evaluates only the trained task at intermediate "
+             "stages and all tasks at the final stage.")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
 
@@ -508,6 +535,8 @@ def main() -> None:
         slice_retain_batch_size_set=args.slice_retain_batch_size_set,
         slice_single_retain_task_mode=args.slice_single_retain_task_mode,
         keep_all_checkpoints=args.keep_all_checkpoints,
+        general_eval_strategy=args.general_eval_strategy,
+        seen_eval_strategy=args.seen_eval_strategy,
         orchestrator_config=orchestrator_config,
     )
 

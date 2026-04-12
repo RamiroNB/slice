@@ -22,7 +22,7 @@ TASK_EVAL_MAX_NEW_TOKENS="${TASK_EVAL_MAX_NEW_TOKENS:-32}"
 
 # Used to build a per-sequence run-name.
 RUN_PREFIX="${RUN_PREFIX:-slice}"
-RUN_SUFFIX="${RUN_SUFFIX:-quick_eval}"
+RUN_SUFFIX="${RUN_SUFFIX:-full_eval}"
 
 # Slice defaults (override via env if needed)
 SLICE_CACHE_DIR="${SLICE_CACHE_DIR:-slice_cache}"
@@ -63,11 +63,13 @@ run_sequence() {
             --slice-max-steps 8 \
             --slice-grad-project \
             --slice-retain-batch-size-set each_task \
+            --general-eval-strategy final_only \
+            --seen-eval-strategy diagonal_final \
             --log-level "${LOG_LEVEL}" \
-            --quick-eval \
             "${EXTRA_ARGS[@]}"
 }
 
-run_sequence "NI-Seq-G1" "each_task3_${RUN_PREFIX}_ni_seq_g1_${RUN_SUFFIX}"
+run_sequence "NI-Seq-Dummy" "${RUN_PREFIX}_ni_seq_dummy_${RUN_SUFFIX}"
+# run_sequence "NI-Seq-G1" "each_task3_${RUN_PREFIX}_ni_seq_g1_${RUN_SUFFIX}"
 # run_sequence "NI-Seq-G2" "each_task3_${RUN_PREFIX}_ni_seq_g2_${RUN_SUFFIX}"
-run_sequence "TRACE" "each_task3_${RUN_PREFIX}_trace_r${RANK}_${RUN_SUFFIX}"
+# run_sequence "TRACE" "each_task3_${RUN_PREFIX}_trace_r${RANK}_${RUN_SUFFIX}"
