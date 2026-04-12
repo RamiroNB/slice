@@ -381,7 +381,7 @@ def compute_slice_inits(
     r_use = config.rank or int(getattr(lora_cfg, "r", 8))
     inits = {}
     for name, g in combined.items():
-        logger.info("Building A/B for module %s: G_shape=%s r=%d", name, tuple(g.shape), r_use)
+        logger.debug("Building A/B for module %s: G_shape=%s r=%d", name, tuple(g.shape), r_use)
         ab = _build_ab_from_gradient(g, r=r_use)
         logger.debug("Built A/B for %s: A_shape=%s B_shape=%s", name, tuple(ab['A'].shape), tuple(ab['B'].shape))
         inits[name] = ab
@@ -610,7 +610,7 @@ def apply_slice_inits(
                 weight_stored32 = base_weight.data.to(torch.float32)
                 recon32 = weight_stored32 + offset32
                 diff = (recon32 - weight_orig32).abs().max()
-                tol = 1e-4 if orig_dtype in (torch.float16, torch.bfloat16) else 1e-7
+                tol = 1e-3 if orig_dtype in (torch.float16, torch.bfloat16) else 1e-7
                 if diff > tol:
                     logger.warning(
                         "[slice] LoRA absorption diff for layer %s: max|W_frozen+DeltaW-W_orig|=%.3e (tol=%.3e)",

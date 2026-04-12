@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
-import logging
 
 try:
     from importlib import metadata as importlib_metadata  # py3.8+
@@ -151,6 +152,7 @@ def run_sequence(
     slice_retain_grad_accum: int | None = None,
     slice_retain_batch_size_set: str = "all_tasks",
     slice_single_retain_task_mode: bool = False,
+    keep_all_checkpoints: bool = False,
     orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
@@ -180,6 +182,7 @@ def run_sequence(
         "slice_retain_grad_accum": slice_retain_grad_accum,
         "slice_retain_batch_size_set": slice_retain_batch_size_set,
         "slice_single_retain_task_mode": slice_single_retain_task_mode,
+        "keep_all_checkpoints": keep_all_checkpoints,
     }
 
     run_cfg_payload: Dict[str, Any] = {
@@ -337,6 +340,16 @@ def run_sequence(
             },
         )
 
+        # Remove the previous stage checkpoint to save disk space.
+        # Only the most recent checkpoint is needed for --resume.
+        if not keep_all_checkpoints and idx >= 2:
+            prev_task = sequence.tasks[idx - 2]
+            prev_safe = _safe_name(prev_task.name)
+            old_checkpoint = checkpoint_root / f"stage_{idx - 1:02d}_{prev_safe}"
+            if old_checkpoint.exists():
+                shutil.rmtree(old_checkpoint)
+                print(f"  Cleaned up old checkpoint: {old_checkpoint}")
+
     summary = compute_cl_metrics(stage_records=stage_records, task_order=task_order)
     final_payload = {
         "sequence": sequence_name,
@@ -415,6 +428,8 @@ def main() -> None:
         help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
     parser.add_argument("--slice-single-retain-task-mode", action="store_true",
         help="Only use the most recent previous task for retain, with same batch size as forget.")
+    parser.add_argument("--keep-all-checkpoints", action="store_true",
+        help="Keep all intermediate stage checkpoints. By default only the latest is kept.")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
 
@@ -492,6 +507,7 @@ def main() -> None:
         slice_retain_grad_accum=args.slice_retain_grad_accum,
         slice_retain_batch_size_set=args.slice_retain_batch_size_set,
         slice_single_retain_task_mode=args.slice_single_retain_task_mode,
+        keep_all_checkpoints=args.keep_all_checkpoints,
         orchestrator_config=orchestrator_config,
     )
 

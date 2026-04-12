@@ -33,6 +33,11 @@ def _extract_primary_metric(task_result: Dict[str, float]) -> float | None:
         "rougeL,none",
         "bleu,none",
     ]
+    # Try preferred keys in priority order first.
+    for key in preferred:
+        if key in task_result and isinstance(task_result[key], float):
+            return float(task_result[key])
+
     # Fallback: any exact_match or acc key (catches variant suffixes)
     for key, value in task_result.items():
         if isinstance(value, float) and (

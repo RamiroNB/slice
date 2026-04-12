@@ -88,14 +88,12 @@ def compute_cl_metrics(
     if final_general is None:
         final_general = stage_records[-1].get("evaluation", {}).get("general", {})
 
+    ap = _mean(diag_values)
+    fp = _mean(final_values)
     metrics = {
-        "AP": _mean(diag_values),
-        "FP": _mean(final_values),
-        "Forget": (
-            (_mean(diag_values) - _mean(final_values))
-            if (_mean(diag_values) is not None and _mean(final_values) is not None)
-            else None
-        ),
+        "AP": ap,
+        "FP": fp,
+        "Forget": (ap - fp) if (ap is not None and fp is not None) else None,
         "GP": final_general.get("gp_mean"),
         "IP": final_general.get("ip_mean"),
     }
