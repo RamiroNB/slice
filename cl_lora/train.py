@@ -31,7 +31,7 @@ except ImportError:
     from load_dataset import load_training_dataset
     from lora_config import build_lora_config
     from repro import set_global_seed
-    from slice import SliceInitConfig, initialize_lora_with_slice
+    from slice import SliceInitConfig, initialize_lora_with_slice  # type: ignore[no-redef]
 
 
 def _patch_accelerate_unwrap_model_compat() -> None:

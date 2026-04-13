@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import torch
 import logging
 
-logger = logging.getLogger("cl_lora.slice_cache")
+logger = logging.getLogger("cl_lora.slice.cache")
 
 
 @dataclass
