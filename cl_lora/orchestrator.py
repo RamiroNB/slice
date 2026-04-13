@@ -152,6 +152,7 @@ def run_sequence(
     slice_retain_grad_accum: int | None = None,
     slice_retain_batch_size_set: str = "all_tasks",
     slice_single_retain_task_mode: bool = False,
+    slice_init_method: str = "slice",
     keep_all_checkpoints: bool = False,
     general_eval_strategy: str = "every_stage",
     seen_eval_strategy: str = "full_matrix",
@@ -184,6 +185,7 @@ def run_sequence(
         "slice_retain_grad_accum": slice_retain_grad_accum,
         "slice_retain_batch_size_set": slice_retain_batch_size_set,
         "slice_single_retain_task_mode": slice_single_retain_task_mode,
+        "slice_init_method": slice_init_method,
         "keep_all_checkpoints": keep_all_checkpoints,
         "general_eval_strategy": general_eval_strategy,
         "seen_eval_strategy": seen_eval_strategy,
@@ -303,6 +305,7 @@ def run_sequence(
             slice_retain_grad_accum=slice_retain_grad_accum,
             slice_retain_batch_size_set=slice_retain_batch_size_set,
             slice_single_retain_task_mode=slice_single_retain_task_mode,
+            slice_init_method=slice_init_method,
         )
 
         seen_tasks.append(task)
@@ -448,6 +451,10 @@ def main() -> None:
         help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
     parser.add_argument("--slice-single-retain-task-mode", action="store_true",
         help="Only use the most recent previous task for retain, with same batch size as forget.")
+    parser.add_argument("--slice-init-method", choices=["slice", "lora_ga", "loram"],
+        default="slice",
+        help="Initialization method: 'slice' (default), 'lora_ga' (SVD on forget gradients only), "
+             "or 'loram' (DST-based, no gradients).")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
         help="Keep all intermediate stage checkpoints. By default only the latest is kept.")
     parser.add_argument("--general-eval-strategy", choices=["every_stage", "final_only"],
@@ -534,6 +541,7 @@ def main() -> None:
         slice_retain_grad_accum=args.slice_retain_grad_accum,
         slice_retain_batch_size_set=args.slice_retain_batch_size_set,
         slice_single_retain_task_mode=args.slice_single_retain_task_mode,
+        slice_init_method=args.slice_init_method,
         keep_all_checkpoints=args.keep_all_checkpoints,
         general_eval_strategy=args.general_eval_strategy,
         seen_eval_strategy=args.seen_eval_strategy,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -38,6 +39,7 @@ class SliceInitConfig:
     retain_grad_accum: Optional[int] = None
     retain_batch_size_set: str = "all_tasks"
     single_retain_task_mode: bool = False
+    init_method: str = "slice"  # "slice" (default), "lora_ga", or "loram"
 
 
 logger = logging.getLogger("cl_lora.slice")
@@ -179,6 +181,76 @@ def _build_ab_from_gradient(G: torch.Tensor, r: int) -> Dict[str, torch.Tensor]:
     }
 
 
+def _fast_dst_matrix(m: int, n: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Generate an m x n DST-I matrix."""
+    transpose = False
+    if m < n:
+        m, n = n, m
+        transpose = True
+
+    k = torch.arange(n, device=device, dtype=dtype).unsqueeze(1)  # (n, 1)
+    i = torch.arange(m, device=device, dtype=dtype).unsqueeze(0)  # (1, m)
+
+    dst_basis = torch.sin((i + 1) * (k + 1) * torch.pi / (m + 1))
+    scale_local = torch.sqrt(torch.tensor(2.0 / (m + 1), device=device, dtype=dtype))
+    dst_matrix = (scale_local * dst_basis).t()
+
+    if transpose:
+        dst_matrix = dst_matrix.t()
+
+    return dst_matrix.to(device=device, dtype=dtype)
+
+
+def _build_ab_loram(
+    d_out: int, d_in: int, r: int, weight_var: float, device: torch.device, dtype: torch.dtype,
+) -> Dict[str, torch.Tensor]:
+    """Build LoRAM A/B from DST matrices with variance-matched scaling."""
+    A = _fast_dst_matrix(r, d_in, device=device, dtype=torch.float32)
+    B = _fast_dst_matrix(d_out, r, device=device, dtype=torch.float32)
+
+    eps = 1e-12
+    recon = B @ A
+    var_recon = float(torch.var(recon).item()) if torch.var(recon).item() != 0.0 else eps
+    variance_ratio = float(weight_var) / (var_recon + eps)
+    min_dim = max(2, min(d_out, d_in))
+    r_val = max(2, r)
+    rho = math.log(r_val, min_dim)
+    beta = math.pow(max(rho * variance_ratio, eps), 1.0 / 4.0)
+    B = B * beta
+    A = A * beta
+
+    return {
+        "A": A.to(device=device, dtype=dtype).contiguous(),
+        "B": B.to(device=device, dtype=dtype).contiguous(),
+    }
+
+
+def compute_loram_inits(
+    model: torch.nn.Module,
+    *,
+    config: SliceInitConfig,
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    """Compute LoRAM initialization (DST-based, no gradients needed)."""
+    lora_cfg = build_lora_config()
+    target_params = _target_weight_params(model, lora_cfg.target_modules)
+    if not target_params:
+        raise RuntimeError("No target modules matched for LoRAM initialization.")
+
+    device = _model_device(model)
+    r_use = config.rank or int(getattr(lora_cfg, "r", 8))
+    logger.info("Computing LoRAM inits: modules=%d rank=%d", len(target_params), r_use)
+
+    inits = {}
+    for name, param in target_params.items():
+        d_out, d_in = param.shape
+        weight_var = float(param.detach().float().var().item())
+        ab = _build_ab_loram(d_out, d_in, r_use, weight_var, device=device, dtype=param.dtype)
+        logger.debug("LoRAM A/B for %s: A_shape=%s B_shape=%s weight_var=%.6g",
+                      name, tuple(ab['A'].shape), tuple(ab['B'].shape), weight_var)
+        inits[name] = ab
+    return inits
+
+
 def _combine_grads(
     grads_forget: Dict[str, torch.Tensor],
     grads_retain: Optional[Dict[str, torch.Tensor]],
@@ -271,10 +343,16 @@ def compute_slice_inits(
     *,
     config: SliceInitConfig,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
-    retain_tasks = retain_tasks or []
+    # LoRA-GA baseline: ignore retain tasks entirely
+    if config.init_method == "lora_ga":
+        retain_tasks = []
+        logger.info("LoRA-GA mode: ignoring retain tasks")
+    else:
+        retain_tasks = retain_tasks or []
     retain_names = [getattr(rt, "name", str(rt)) for rt in retain_tasks] or None
     logger.info(
-        "Starting slice init: forget=%s retain=%s max_steps=%s batch_size=%s",
+        "Starting slice init (method=%s): forget=%s retain=%s max_steps=%s batch_size=%s",
+        config.init_method,
         getattr(forget_task, "name", str(forget_task)),
         retain_names,
         config.max_steps,
@@ -447,6 +525,7 @@ def load_or_compute_slice_inits(
     }
 
     payload = {
+        "init_method": config.init_method,
         "cache_context": config.cache_context,
         "forget_task": _task_fingerprint(forget_task),
         "retain_tasks": [_task_fingerprint(rt) for rt in (retain_tasks or [])] or None,
@@ -475,13 +554,16 @@ def load_or_compute_slice_inits(
         return cached.inits
     logger.info("Slice cache miss: will compute inits (cache_dir=%s cache_key=%s)", config.cache_dir, cache_key)
 
-    inits = compute_slice_inits(
-        model=model,
-        tokenizer=tokenizer,
-        forget_task=forget_task,
-        retain_tasks=retain_tasks,
-        config=config,
-    )
+    if config.init_method == "loram":
+        inits = compute_loram_inits(model=model, config=config)
+    else:
+        inits = compute_slice_inits(
+            model=model,
+            tokenizer=tokenizer,
+            forget_task=forget_task,
+            retain_tasks=retain_tasks,
+            config=config,
+        )
 
     save_slice_cache(
         config.cache_dir,
