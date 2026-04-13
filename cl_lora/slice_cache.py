@@ -59,7 +59,7 @@ def load_slice_cache(
         path = os.path.join(inits_dir, fname)
         key = fname[:-3]
         map_loc = device if device is not None else "cpu"
-        payload = torch.load(path, map_location=map_loc)
+        payload = torch.load(path, map_location=map_loc, weights_only=True)
         if isinstance(payload, dict) and "A" in payload and "B" in payload:
             inits[key] = {"A": payload["A"], "B": payload["B"]}
 

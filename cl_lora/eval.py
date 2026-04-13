@@ -33,6 +33,11 @@ def _extract_primary_metric(task_result: Dict[str, float]) -> float | None:
         "rougeL,none",
         "bleu,none",
     ]
+    # Try preferred keys in priority order first.
+    for key in preferred:
+        if key in task_result and isinstance(task_result[key], float):
+            return float(task_result[key])
+
     # Fallback: any exact_match or acc key (catches variant suffixes)
     for key, value in task_result.items():
         if isinstance(value, float) and (
@@ -379,6 +384,8 @@ def _evaluate_task_perplexity(
         batch_size=per_device_eval_batch_size,
         shuffle=False,
         collate_fn=collator,
+        num_workers=4,
+        pin_memory=True,
     )
 
     device = _model_device(model)
@@ -672,43 +679,59 @@ def evaluate_all(
     task_eval_samples: int = 64,
     task_eval_max_new_tokens: int = 64,
     quick_eval: bool = False,
+    skip_general_eval: bool = False,
     seed: int = 42,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
+
+    # Try to compile the model for faster repeated forward passes.
+    # The compiled wrapper shares parameters with the original model
+    # and is discarded when this function returns.
+    eval_model = model
+    if hasattr(torch, "compile"):
+        try:
+            eval_model = torch.compile(model)
+        except Exception:
+            eval_model = model
+
+    # -- seen-task evaluation (uses compiled model) --
     if quick_eval:
         seen = evaluate_seen_tasks_perplexity(
-            model=model,
+            model=eval_model,
             tokenizer=tokenizer,
             seen_tasks=seen_tasks,
             eval_size=eval_size,
             task_eval_samples=task_eval_samples,
             seed=seed,
         )
-        general = {
-            "gp": {},
-            "ip": {},
-            "gp_mean": None,
-            "ip_mean": None,
-            "mode": "quick_perplexity",
-        }
     else:
-        eval_keys = general_eval_task_keys or CORE_EVAL_TASKS
-
-        general = evaluate_general_tasks(
-            model=model,
-            tokenizer=tokenizer,
-            eval_task_keys=eval_keys,
-            batch_size=general_eval_batch_size,
-            seed=seed,
-        )
         seen = evaluate_seen_tasks(
-            model=model,
+            model=eval_model,
             tokenizer=tokenizer,
             seen_tasks=seen_tasks,
             output_dir=output_dir,
             eval_size=eval_size,
             max_new_tokens=task_eval_max_new_tokens,
             task_eval_samples=task_eval_samples,
+            seed=seed,
+        )
+
+    # -- general evaluation (original model for lm-eval HFLM compat) --
+    if quick_eval or skip_general_eval:
+        general = {
+            "gp": {},
+            "ip": {},
+            "gp_mean": None,
+            "ip_mean": None,
+            "mode": "quick_perplexity" if quick_eval else "skipped",
+        }
+    else:
+        eval_keys = general_eval_task_keys or CORE_EVAL_TASKS
+        general = evaluate_general_tasks(
+            model=model,
+            tokenizer=tokenizer,
+            eval_task_keys=eval_keys,
+            batch_size=general_eval_batch_size,
             seed=seed,
         )
 

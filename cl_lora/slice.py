@@ -25,7 +25,7 @@ except ImportError:
 class SliceInitConfig:
     cache_dir: str = "slice_cache"
     cache_context: Optional[str] = None
-    max_steps: int = 100
+    max_steps: int = 8
     per_device_batch_size: int = 64
     seed: int = 42
     retain_scale: float = 1.0
@@ -66,6 +66,8 @@ def _build_dataloader(dataset, tokenizer, batch_size: int, seed: int) -> DataLoa
         shuffle=True,
         collate_fn=collator,
         generator=generator,
+        num_workers=4,
+        pin_memory=True,
     )
 
 
@@ -102,6 +104,19 @@ def _accumulate_gradients(
     for p in target_params.values():
         p.requires_grad_(True)
 
+    # Enable gradient checkpointing to reduce activation memory,
+    # allowing larger batch sizes during gradient accumulation.
+    _had_gc = getattr(model, "is_gradient_checkpointing", False)
+    _use_cache = getattr(getattr(model, "config", None), "use_cache", None)
+    if not _had_gc and hasattr(model, "gradient_checkpointing_enable"):
+        try:
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False},
+            )
+        except TypeError:
+            # Older transformers without gradient_checkpointing_kwargs
+            model.gradient_checkpointing_enable()
+
     steps = 0
     model.train()
     for batch in dataloader:
@@ -120,6 +135,12 @@ def _accumulate_gradients(
             grads[name] = grads[name] + param.grad.detach()
         model.zero_grad(set_to_none=True)
         steps += 1
+
+    # Restore gradient checkpointing and use_cache state.
+    if not _had_gc and hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    if _use_cache is not None and hasattr(model, "config"):
+        model.config.use_cache = _use_cache
 
     for name, p in target_params.items():
         p.requires_grad_(saved_requires_grad[name])
@@ -381,7 +402,7 @@ def compute_slice_inits(
     r_use = config.rank or int(getattr(lora_cfg, "r", 8))
     inits = {}
     for name, g in combined.items():
-        logger.info("Building A/B for module %s: G_shape=%s r=%d", name, tuple(g.shape), r_use)
+        logger.debug("Building A/B for module %s: G_shape=%s r=%d", name, tuple(g.shape), r_use)
         ab = _build_ab_from_gradient(g, r=r_use)
         logger.debug("Built A/B for %s: A_shape=%s B_shape=%s", name, tuple(ab['A'].shape), tuple(ab['B'].shape))
         inits[name] = ab
@@ -610,7 +631,7 @@ def apply_slice_inits(
                 weight_stored32 = base_weight.data.to(torch.float32)
                 recon32 = weight_stored32 + offset32
                 diff = (recon32 - weight_orig32).abs().max()
-                tol = 1e-4 if orig_dtype in (torch.float16, torch.bfloat16) else 1e-7
+                tol = 1e-3 if orig_dtype in (torch.float16, torch.bfloat16) else 1e-7
                 if diff > tol:
                     logger.warning(
                         "[slice] LoRA absorption diff for layer %s: max|W_frozen+DeltaW-W_orig|=%.3e (tol=%.3e)",

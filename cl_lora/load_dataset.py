@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -9,10 +11,51 @@ from typing import Any, Tuple, Union
 import requests
 from datasets import Dataset
 
+logger = logging.getLogger("cl_lora.load_dataset")
+
 try:
     from .task_sequences import SuperNITask, TraceTask, all_superni_tasks
 except ImportError:
     from task_sequences import SuperNITask, TraceTask, all_superni_tasks
+
+
+_DATASET_CACHE_DIR = Path(os.environ.get(
+    "CL_LORA_DATASET_CACHE",
+    # os.path.expanduser("~/.cache/cl_lora/datasets"),
+    str(Path(__file__).resolve().parents[1] / "datasets_cache"),
+))
+
+
+def _cached_fetch_json(url: str, timeout: int = 30) -> Any:
+    """Fetch JSON from *url* with local disk caching.
+
+    Cached files are stored under ``$CL_LORA_DATASET_CACHE``
+    (default ``~/.cache/cl_lora/datasets``).  Set the env-var to
+    change the location.
+    """
+    url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", url.rsplit("/", 1)[-1])[:80]
+    cache_path = _DATASET_CACHE_DIR / f"{safe_name}_{url_hash}.json"
+
+    if cache_path.exists():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            logger.debug("Dataset cache hit: %s", cache_path)
+            return data
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Corrupted dataset cache entry %s — re-downloading", cache_path)
+
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=True)
+    logger.debug("Dataset cached: %s -> %s", url, cache_path)
+
+    return data
 
 
 SUPERNI_RAW_TEMPLATE = (
@@ -202,8 +245,7 @@ def _load_trace_raw(task_name: str, split: str = "train") -> Dataset:
 
     url = TRACE_RAW_TEMPLATE.format(task_folder=folder, split=split)
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
+        records = _cached_fetch_json(url)
     except requests.HTTPError as exc:
         if exc.response is not None and exc.response.status_code == 404:
             raise RuntimeError(
@@ -211,8 +253,6 @@ def _load_trace_raw(task_name: str, split: str = "train") -> Dataset:
                 "to GitHub for this split, clone TRACE data locally and load from local files."
             ) from exc
         raise
-
-    records = response.json()
     if not isinstance(records, list):
         raise ValueError(f"Unexpected TRACE JSON format from {url}; expected a list of records.")
 
@@ -226,10 +266,7 @@ def load_superni_training_dataset(
 ) -> Tuple[Dataset, Dataset]:
     resolved_name = _resolve_superni_task_name(task_name)
     url = SUPERNI_RAW_TEMPLATE.format(task_name=resolved_name)
-
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    data = response.json()
+    data = _cached_fetch_json(url)
 
     instances = data.get("Instances", [])
     if not instances:

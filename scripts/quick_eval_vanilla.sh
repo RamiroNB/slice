@@ -51,6 +51,7 @@ run_sequence() {
       "${EXTRA_ARGS[@]}"
 }
 
-run_sequence "NI-Seq-G1" "${RUN_PREFIX}_ni_seq_g1_${RUN_SUFFIX}"
-run_sequence "NI-Seq-G2" "${RUN_PREFIX}_ni_seq_g2_${RUN_SUFFIX}"
-run_sequence "TRACE" "debug_${RUN_PREFIX}_trace_r${RANK}_${RUN_SUFFIX}"
+run_sequence "NI-Seq-Dummy" "${RUN_PREFIX}_ni_seq_dummy_${RUN_SUFFIX}"
+# run_sequence "NI-Seq-G1" "${RUN_PREFIX}_ni_seq_g1_${RUN_SUFFIX}"
+# run_sequence "NI-Seq-G2" "${RUN_PREFIX}_ni_seq_g2_${RUN_SUFFIX}"
+# run_sequence "TRACE" "debug_${RUN_PREFIX}_trace_r${RANK}_${RUN_SUFFIX}"
