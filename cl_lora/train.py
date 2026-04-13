@@ -72,7 +72,7 @@ def load_base_model(
     device_map: str = "auto",
 ):
     kwargs: dict = dict(
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         device_map=device_map,
         token=hf_token,
     )

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from pathlib import Path
+import pickle
 from typing import Any, Tuple, Union
 
 import requests
@@ -13,6 +14,50 @@ from datasets import Dataset
 
 logger = logging.getLogger("cl_lora.load_dataset")
 
+FAIRNESS_TASK_ALIASES = {
+    "bbq": "bbq",
+    "fairness_bbq": "bbq",
+    "difference_awareness": "difference_awareness",
+    "fairness_difference_awareness": "difference_awareness",
+    "winogender": "winogender",
+    "wino_gender": "winogender",
+    "fairness_winogender": "winogender",
+}
+
+WINOGENDER_RAW_URL = (
+    "https://raw.githubusercontent.com/rudinger/winogender-schemas/master/data/all_sentences.tsv"
+)
+
+DIFF_AWARENESS_RAW_BASE = (
+    "https://raw.githubusercontent.com/Angelina-Wang/difference_awareness/main/benchmark_suite"
+)
+
+DIFF_AWARENESS_FILES = [
+    "D1_1k.pkl",
+    "D2_1k.pkl",
+    "D3_1k.pkl",
+    "D4_1k.pkl",
+    "N1_1k.pkl",
+    "N2_1k.pkl",
+    "N3_1k.pkl",
+    "N4_1k.pkl",
+]
+
+BBQ_RAW_BASE = "https://raw.githubusercontent.com/nyu-mll/BBQ/main/data"
+BBQ_CATEGORY_FILES = [
+    "Age",
+    "Disability_status",
+    "Gender_identity",
+    "Nationality",
+    "Physical_appearance",
+    "Race_ethnicity",
+    "Religion",
+    "SES",
+    "Sexual_orientation",
+    # Intersectional categories may exist in some mirrors.
+    "Race_x_gender",
+    "Race_x_SES",
+]
 try:
     from .task_sequences import SuperNITask, TraceTask, all_superni_tasks
 except ImportError:
@@ -56,6 +101,47 @@ def _cached_fetch_json(url: str, timeout: int = 30) -> Any:
     logger.debug("Dataset cached: %s -> %s", url, cache_path)
 
     return data
+
+
+def _cached_fetch_bytes(url: str, timeout: int = 30) -> bytes:
+    """Fetch bytes from *url* with local disk caching."""
+    url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", url.rsplit("/", 1)[-1])[:80]
+    cache_path = _DATASET_CACHE_DIR / f"{safe_name}_{url_hash}.bin"
+
+    if cache_path.exists():
+        try:
+            with open(cache_path, "rb") as f:
+                return f.read()
+        except OSError:
+            logger.warning("Corrupted dataset cache entry %s — re-downloading", cache_path)
+
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    payload = response.content
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "wb") as f:
+        f.write(payload)
+    logger.debug("Dataset cached: %s -> %s", url, cache_path)
+    return payload
+
+
+def _parse_jsonl_bytes(payload: bytes, source_name: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    text = payload.decode("utf-8")
+    for line_idx, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            logger.warning("Skipping malformed JSONL line %d in %s: %s", line_idx, source_name, exc)
+            continue
+        if isinstance(obj, dict):
+            records.append(obj)
+    return records
 
 
 SUPERNI_RAW_TEMPLATE = (
@@ -121,6 +207,93 @@ def _split_dataset(dataset: Dataset, eval_size: int, seed: int) -> Tuple[Dataset
     test_size = min(eval_size, len(dataset) - 1)
     split = dataset.train_test_split(test_size=test_size, seed=seed)
     return split["train"], split["test"]
+
+
+def _canonical_fairness_task_name(task_name: str) -> str | None:
+    return FAIRNESS_TASK_ALIASES.get(task_name.strip().lower())
+
+
+def _coerce_choice_label(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        mapping = {0: "A", 1: "B", 2: "C"}
+        return mapping.get(value)
+
+    text = _to_text(value).strip().lower()
+    if not text:
+        return None
+
+    if text in {"a", "b", "c"}:
+        return text.upper()
+
+    if text in {"0", "1", "2"}:
+        return {"0": "A", "1": "B", "2": "C"}[text]
+
+    match = re.search(r"\b([abc])\b", text)
+    if match:
+        return match.group(1).upper()
+
+    match = re.search(r"\b([012])\b", text)
+    if match:
+        return {"0": "A", "1": "B", "2": "C"}[match.group(1)]
+
+    return None
+
+
+def _extract_group_id_from_uid(uid: Any, fallback: str) -> str:
+    uid_text = _to_text(uid).strip()
+    if not uid_text:
+        return fallback
+
+    if "-" in uid_text:
+        prefix = uid_text.split("-", 1)[0].strip()
+        if prefix:
+            return prefix
+    return uid_text
+
+
+def _format_fairness_record(
+    *,
+    task_name: str,
+    question: str,
+    options: list[str] | None,
+    target_label: str,
+    group_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if options:
+        options_text = "\n".join(
+            f"({chr(ord('A') + i)}) {opt}" for i, opt in enumerate(options) if opt
+        )
+        instruction = (
+            f"Fairness task: {task_name}\n\n"
+            f"{question}\n\n"
+            f"Options:\n{options_text}\n\n"
+            "Answer with only one option letter."
+        )
+    else:
+        # Options are already embedded in the question text (e.g. difference_awareness).
+        instruction = (
+            f"Fairness task: {task_name}\n\n"
+            f"{question}\n\n"
+            "Answer with only one option letter (A for option a, B for option b, C for option c)."
+        )
+    prompt = _build_chat_prompt(instruction)
+    text = _build_chat_text(prompt_text=prompt, output_text=target_label)
+    return {
+        "text": text,
+        "prompt": prompt,
+        "target": target_label,
+        "group_id": group_id,
+        "label_id": {"A": 0, "B": 1, "C": 2}.get(target_label),
+        "source_dataset": task_name,
+        "metadata": metadata or {},
+    }
 
 
 def _build_chat_prompt(instruction_text: str) -> str:
@@ -259,6 +432,281 @@ def _load_trace_raw(task_name: str, split: str = "train") -> Dataset:
     return Dataset.from_list(records)
 
 
+def _load_bbq_records() -> list[dict[str, Any]]:
+    raw_examples: list[dict[str, Any]] = []
+
+    local_root = os.getenv("BBQ_DATA_DIR") or os.getenv("BBQ_DIR")
+    if local_root:
+        root = Path(local_root)
+        candidate_dirs = [root, root / "data", root / "BBQ_full" / "data"]
+        local_files: list[Path] = []
+        for candidate in candidate_dirs:
+            if candidate.is_dir():
+                local_files.extend(sorted(candidate.glob("*.jsonl")))
+            elif candidate.is_file() and candidate.suffix == ".jsonl":
+                local_files.append(candidate)
+
+        for path in local_files:
+            try:
+                blob = path.read_bytes()
+                raw_examples.extend(_parse_jsonl_bytes(blob, str(path)))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Skipping local BBQ file %s due to error: %s", path, exc)
+
+    if not raw_examples:
+        for category in BBQ_CATEGORY_FILES:
+            url = f"{BBQ_RAW_BASE}/{category}.jsonl"
+            try:
+                blob = _cached_fetch_bytes(url)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Skipping remote BBQ category %s due to error: %s", category, exc)
+                continue
+            raw_examples.extend(_parse_jsonl_bytes(blob, url))
+
+    if not raw_examples:
+        raise RuntimeError(
+            "Could not load BBQ records from local files or GitHub raw JSONL. "
+            "Tip: set BBQ_DATA_DIR to a BBQ data folder containing *.jsonl files."
+        )
+
+    records: list[dict[str, Any]] = []
+    for example in raw_examples:
+        context = _to_text(example.get("context", "")).strip()
+        question = _to_text(example.get("question", "")).strip()
+        ans0 = _to_text(example.get("ans0", "")).strip()
+        ans1 = _to_text(example.get("ans1", "")).strip()
+        ans2 = _to_text(example.get("ans2", "")).strip()
+        label = _coerce_choice_label(example.get("label"))
+        if not label:
+            label = _coerce_choice_label(example.get("target"))
+        if not label:
+            continue
+
+        additional_metadata = example.get("additional_metadata", {})
+        stereotype_groups = None
+        if isinstance(additional_metadata, dict):
+            stereotype_groups = additional_metadata.get("stereotyped_groups")
+
+        group_id = _to_text(example.get("category", "")).strip() or "bbq"
+        if stereotype_groups:
+            if isinstance(stereotype_groups, list) and stereotype_groups:
+                group_id = f"{group_id}:{_to_text(stereotype_groups[0]).strip()}"
+            elif isinstance(stereotype_groups, str):
+                group_id = f"{group_id}:{stereotype_groups.strip()}"
+
+        question_text = f"Context: {context}\nQuestion: {question}" if context else question
+        records.append(
+            _format_fairness_record(
+                task_name="bbq",
+                question=question_text,
+                options=[ans0, ans1, ans2],
+                target_label=label,
+                group_id=group_id,
+                metadata={
+                    "context_condition": example.get("context_condition"),
+                    "question_polarity": example.get("question_polarity"),
+                    "example_id": example.get("example_id"),
+                    "category": example.get("category"),
+                },
+            )
+        )
+
+    if not records:
+        raise RuntimeError("Loaded BBQ dataset but produced zero normalized records.")
+    return records
+
+
+def _load_winogender_records() -> list[dict[str, Any]]:
+    """Load WinoGender Schemas (Rudinger et al., 2018).
+
+    Task: pronoun coreference in sentences with an occupation person and another
+    participant.  The pronoun is already filled in; the model must choose whether
+    it refers to the occupation person (→ A) or the other person (→ B).
+
+    The fairness signal lives in the accuracy gap across pronoun types
+    (male / female / neutral) — a biased model performs differently based on
+    whether the pronoun matches the occupational gender stereotype.
+
+    sentid format: ``{occupation}.{other_entity}.{answer_index}.{pronoun_type}.txt``
+      answer_index 0 → occupation person → label A
+      answer_index 1 → other person      → label B
+    """
+    local_root = os.getenv("WINOGENDER_DATA_DIR")
+    blob: bytes | None = None
+
+    if local_root:
+        local_path = Path(local_root) / "all_sentences.tsv"
+        if local_path.exists():
+            blob = local_path.read_bytes()
+
+    if blob is None:
+        blob = _cached_fetch_bytes(WINOGENDER_RAW_URL)
+
+    lines = blob.decode("utf-8").splitlines()
+    records: list[dict[str, Any]] = []
+
+    for line in lines[1:]:  # skip header
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        sentid, sentence = parts[0].strip(), parts[1].strip()
+
+        # Parse sentid: occupation.other_entity.answer_index.pronoun_type.txt
+        id_parts = sentid.replace(".txt", "").split(".")
+        if len(id_parts) < 4:
+            logger.warning("Skipping WinoGender sentid with unexpected format: %s", sentid)
+            continue
+
+        occupation = id_parts[0]
+        other_entity = id_parts[1]
+        answer_index = id_parts[2]   # "0" = occupation, "1" = other
+        pronoun_type = id_parts[3]   # "male", "female", "neutral"
+
+        if answer_index == "0":
+            target_label = "A"  # pronoun refers to the occupation person
+        elif answer_index == "1":
+            target_label = "B"  # pronoun refers to the other person
+        else:
+            logger.warning("Skipping WinoGender sentid with unknown answer index: %s", sentid)
+            continue
+
+        # Format the other entity for display (strip "the" prefix when it's a named role).
+        other_label = other_entity if other_entity == "someone" else f"the {other_entity}"
+
+        question = f"In the following sentence, who does the pronoun refer to?\n\n\"{sentence}\""
+        records.append(
+            _format_fairness_record(
+                task_name="winogender",
+                question=question,
+                options=[f"The {occupation}", other_label.capitalize()],
+                target_label=target_label,
+                group_id=f"pronoun:{pronoun_type}",
+                metadata={
+                    "occupation": occupation,
+                    "other_entity": other_entity,
+                    "pronoun_type": pronoun_type,
+                    "answer_index": answer_index,
+                    "sentid": sentid,
+                },
+            )
+        )
+
+    if not records:
+        raise RuntimeError(
+            "Could not load WinoGender records. "
+            "Set WINOGENDER_DATA_DIR to a folder containing all_sentences.tsv "
+            "or ensure GitHub access is available."
+        )
+    return records
+
+
+def _load_difference_awareness_pairs_from_local(root: Path, file_name: str) -> tuple[list[Any], list[Any]] | None:
+    local_path = root / file_name
+    if not local_path.exists():
+        return None
+    with open(local_path, "rb") as f:
+        payload = pickle.load(f)
+    if not isinstance(payload, (list, tuple)) or len(payload) < 2:
+        raise ValueError(f"Unexpected payload in {local_path}. Expected [different, equal].")
+    return payload[0], payload[1]
+
+
+def _load_difference_awareness_pairs(file_name: str) -> tuple[list[Any], list[Any]]:
+    env_roots = [
+        os.getenv("DIFFERENCE_AWARENESS_DIR"),
+        os.getenv("DIFF_AWARENESS_DIR"),
+    ]
+    for env_root in env_roots:
+        if not env_root:
+            continue
+        loaded = _load_difference_awareness_pairs_from_local(Path(env_root), file_name)
+        if loaded is not None:
+            return loaded
+
+    url = f"{DIFF_AWARENESS_RAW_BASE}/{file_name}"
+    blob = _cached_fetch_bytes(url)
+    payload = pickle.loads(blob)
+    if not isinstance(payload, (list, tuple)) or len(payload) < 2:
+        raise ValueError(f"Unexpected payload from {url}. Expected [different, equal].")
+    return payload[0], payload[1]
+
+
+def _load_difference_awareness_records() -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for file_name in DIFF_AWARENESS_FILES:
+        try:
+            different, equal = _load_difference_awareness_pairs(file_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skipping difference_awareness file %s due to error: %s", file_name, exc)
+            continue
+
+        benchmark_id = file_name.replace("_1k.pkl", "")
+        for bucket_name, rows in (("different", different), ("equal", equal)):
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, (list, tuple)) or len(row) < 2:
+                    continue
+                question = _to_text(row[0]).strip()
+                label = _coerce_choice_label(row[1])
+                uid = row[2] if len(row) >= 3 else f"{benchmark_id}:{len(records)}"
+                if not question or not label:
+                    continue
+
+                group_id = _extract_group_id_from_uid(uid, fallback=benchmark_id)
+                records.append(
+                    _format_fairness_record(
+                        task_name="difference_awareness",
+                        question=question,
+                        options=None,  # options are already embedded as (a)/(b)/(c) in the question
+                        target_label=label,
+                        group_id=group_id,
+                        metadata={
+                            "benchmark": benchmark_id,
+                            "bucket": bucket_name,
+                            "uid": _to_text(uid),
+                        },
+                    )
+                )
+
+    if not records:
+        raise RuntimeError(
+            "Failed to load difference_awareness records. "
+            "Set DIFFERENCE_AWARENESS_DIR to a folder containing D1_1k.pkl...N4_1k.pkl "
+            "or ensure GitHub access is available."
+        )
+    return records
+
+
+def load_fairness_training_dataset(
+    task_name: str,
+    eval_size: int = 200,
+    seed: int = 42,
+) -> Tuple[Dataset, Dataset]:
+    canonical = _canonical_fairness_task_name(task_name)
+    if canonical is None:
+        raise ValueError(
+            f"Unknown fairness task '{task_name}'. "
+            f"Known fairness tasks: {sorted(FAIRNESS_TASK_ALIASES)}"
+        )
+
+    if canonical == "bbq":
+        records = _load_bbq_records()
+    elif canonical == "winogender":
+        records = _load_winogender_records()
+    elif canonical == "difference_awareness":
+        records = _load_difference_awareness_records()
+    else:
+        raise ValueError(f"Unhandled fairness task '{canonical}'.")
+
+    dataset = Dataset.from_list(records)
+    train_raw, eval_raw = _split_dataset(dataset=dataset, eval_size=eval_size, seed=seed)
+    return train_raw, eval_raw
+
+
 def load_superni_training_dataset(
     task_name: str,
     eval_size: int = 200,
@@ -321,11 +769,12 @@ def load_training_dataset(
     eval_size: int = 200,
     seed: int = 42,
 ) -> Tuple[Dataset, Dataset]:
-    """Unified loader for SuperNI and TRACE tasks.
+    """Unified loader for SuperNI, TRACE, and fairness tasks.
 
     Args:
         task: SuperNI task name/NI id, SuperNITask dataclass, TRACE task name,
-            or TraceTask dataclass.
+            TraceTask dataclass, or fairness task alias (bbq, crows_pairs,
+            difference_awareness).
     """
     if isinstance(task, SuperNITask):
         return load_superni_training_dataset(task.name, eval_size=eval_size, seed=seed)
@@ -339,6 +788,9 @@ def load_training_dataset(
         )
 
     task_name = str(task)
+    if _canonical_fairness_task_name(task_name) is not None:
+        return load_fairness_training_dataset(task_name=task_name, eval_size=eval_size, seed=seed)
+
     if task_name.startswith("task") or re.fullmatch(r"NI\d+", task_name):
         return load_superni_training_dataset(task_name, eval_size=eval_size, seed=seed)
     return load_trace_training_dataset(task_name=task_name, eval_size=eval_size, seed=seed)
