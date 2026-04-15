@@ -19,14 +19,30 @@ FAIRNESS_TASK_ALIASES = {
     "fairness_bbq": "bbq",
     "difference_awareness": "difference_awareness",
     "fairness_difference_awareness": "difference_awareness",
-    "winogender": "winogender",
-    "wino_gender": "winogender",
-    "fairness_winogender": "winogender",
+    "winobias": "winobias",
+    "wino_bias": "winobias",
+    "fairness_winobias": "winobias",
+    # Legacy aliases kept for backwards-compat (WinoGender was replaced by WinoBias).
+    "winogender": "winobias",
+    "wino_gender": "winobias",
+    "fairness_winogender": "winobias",
 }
 
-WINOGENDER_RAW_URL = (
-    "https://raw.githubusercontent.com/rudinger/winogender-schemas/master/data/all_sentences.tsv"
+# WinoBias (Zhao et al., 2018) — 8 files split by pro/anti-stereotyped × type1/type2 × dev/test.
+# Each line: "N [The entity] ... [pronoun] ..." with two bracket spans.
+_WINOBIAS_RAW_BASE = (
+    "https://raw.githubusercontent.com/uclanlp/corefBias/master/WinoBias/wino/data"
 )
+WINOBIAS_FILES = {
+    "pro_stereo_type1_dev":  "pro_stereotyped_type1.txt.dev",
+    "pro_stereo_type1_test": "pro_stereotyped_type1.txt.test",
+    "pro_stereo_type2_dev":  "pro_stereotyped_type2.txt.dev",
+    "pro_stereo_type2_test": "pro_stereotyped_type2.txt.test",
+    "anti_stereo_type1_dev":  "anti_stereotyped_type1.txt.dev",
+    "anti_stereo_type1_test": "anti_stereotyped_type1.txt.test",
+    "anti_stereo_type2_dev":  "anti_stereotyped_type2.txt.dev",
+    "anti_stereo_type2_test": "anti_stereotyped_type2.txt.test",
+}
 
 DIFF_AWARENESS_RAW_BASE = (
     "https://raw.githubusercontent.com/Angelina-Wang/difference_awareness/main/benchmark_suite"
@@ -495,6 +511,10 @@ def _load_bbq_records() -> list[dict[str, Any]]:
                 group_id = f"{group_id}:{stereotype_groups.strip()}"
 
         question_text = f"Context: {context}\nQuestion: {question}" if context else question
+        # answer_info maps ans0/ans1/ans2 → [text, demographic_label].
+        # The demographic_label is matched against stereotyped_groups to identify
+        # which answer position represents the stereotyped choice (for sBBQ scoring).
+        answer_info = example.get("answer_info", {})
         records.append(
             _format_fairness_record(
                 task_name="bbq",
@@ -507,6 +527,8 @@ def _load_bbq_records() -> list[dict[str, Any]]:
                     "question_polarity": example.get("question_polarity"),
                     "example_id": example.get("example_id"),
                     "category": example.get("category"),
+                    "answer_info": answer_info,
+                    "stereotyped_groups": stereotype_groups or [],
                 },
             )
         )
@@ -516,88 +538,109 @@ def _load_bbq_records() -> list[dict[str, Any]]:
     return records
 
 
-def _load_winogender_records() -> list[dict[str, Any]]:
-    """Load WinoGender Schemas (Rudinger et al., 2018).
+def _load_winobias_records() -> list[dict[str, Any]]:
+    """Load WinoBias (Zhao et al., 2018) pronoun coreference dataset.
 
-    Task: pronoun coreference in sentences with an occupation person and another
-    participant.  The pronoun is already filled in; the model must choose whether
-    it refers to the occupation person (→ A) or the other person (→ B).
+    Task: given a sentence with two entities and a pronoun, choose which entity
+    the pronoun refers to.  The fairness signal is the accuracy gap between
+    pro-stereotyped examples (pronoun gender matches occupational stereotype)
+    and anti-stereotyped examples (pronoun gender opposes stereotype).
 
-    The fairness signal lives in the accuracy gap across pronoun types
-    (male / female / neutral) — a biased model performs differently based on
-    whether the pronoun matches the occupational gender stereotype.
+    Format: each line is "N [The entity1] ... [pronoun] ..." (or variant).
+    Two bracket spans appear in every sentence:
+      - The first ``[...]`` span is the coreference target entity.
+      - The second ``[...]`` span contains the pronoun.
+    File naming encodes pro/anti-stereotyped and type1/type2.
 
-    sentid format: ``{occupation}.{other_entity}.{answer_index}.{pronoun_type}.txt``
-      answer_index 0 → occupation person → label A
-      answer_index 1 → other person      → label B
+    Source: https://github.com/uclanlp/corefBias
     """
-    local_root = os.getenv("WINOGENDER_DATA_DIR")
-    blob: bytes | None = None
-
-    if local_root:
-        local_path = Path(local_root) / "all_sentences.tsv"
-        if local_path.exists():
-            blob = local_path.read_bytes()
-
-    if blob is None:
-        blob = _cached_fetch_bytes(WINOGENDER_RAW_URL)
-
-    lines = blob.decode("utf-8").splitlines()
+    local_root = os.getenv("WINOBIAS_DATA_DIR")
     records: list[dict[str, Any]] = []
 
-    for line in lines[1:]:  # skip header
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        sentid, sentence = parts[0].strip(), parts[1].strip()
+    # Regex to find all [bracketed spans] in a line.
+    bracket_re = re.compile(r"\[([^\]]+)\]")
 
-        # Parse sentid: occupation.other_entity.answer_index.pronoun_type.txt
-        id_parts = sentid.replace(".txt", "").split(".")
-        if len(id_parts) < 4:
-            logger.warning("Skipping WinoGender sentid with unexpected format: %s", sentid)
-            continue
+    for split_key, filename in WINOBIAS_FILES.items():
+        blob: bytes | None = None
 
-        occupation = id_parts[0]
-        other_entity = id_parts[1]
-        answer_index = id_parts[2]   # "0" = occupation, "1" = other
-        pronoun_type = id_parts[3]   # "male", "female", "neutral"
+        if local_root:
+            local_path = Path(local_root) / filename
+            if local_path.exists():
+                blob = local_path.read_bytes()
 
-        if answer_index == "0":
-            target_label = "A"  # pronoun refers to the occupation person
-        elif answer_index == "1":
-            target_label = "B"  # pronoun refers to the other person
-        else:
-            logger.warning("Skipping WinoGender sentid with unknown answer index: %s", sentid)
-            continue
+        if blob is None:
+            url = f"{_WINOBIAS_RAW_BASE}/{filename}"
+            try:
+                blob = _cached_fetch_bytes(url)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Skipping WinoBias file %s due to error: %s", filename, exc)
+                continue
 
-        # Format the other entity for display (strip "the" prefix when it's a named role).
-        other_label = other_entity if other_entity == "someone" else f"the {other_entity}"
+        is_pro = split_key.startswith("pro_")
+        group_id = "pro_stereo" if is_pro else "anti_stereo"
 
-        question = f"In the following sentence, who does the pronoun refer to?\n\n\"{sentence}\""
-        records.append(
-            _format_fairness_record(
-                task_name="winogender",
-                question=question,
-                options=[f"The {occupation}", other_label.capitalize()],
-                target_label=target_label,
-                group_id=f"pronoun:{pronoun_type}",
-                metadata={
-                    "occupation": occupation,
-                    "other_entity": other_entity,
-                    "pronoun_type": pronoun_type,
-                    "answer_index": answer_index,
-                    "sentid": sentid,
-                },
+        for raw_line in blob.decode("utf-8").splitlines():
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+
+            # Strip leading line number if present.
+            line_text = re.sub(r"^\d+\s+", "", raw_line)
+
+            spans = bracket_re.findall(line_text)
+            if len(spans) < 2:
+                logger.warning("WinoBias line missing two bracket spans (skipping): %r", raw_line)
+                continue
+
+            entity_span = spans[0]   # e.g. "The developer" or "the designer"
+            pronoun_span = spans[1]  # e.g. "he", "her"
+
+            # Remove brackets to get the plain sentence.
+            sentence = bracket_re.sub(lambda m: m.group(1), line_text).strip()
+
+            # Identify all "the X" / "The X" mentions in the sentence to find the other entity.
+            # We collect unique bare noun phrases (without "the"/"The") and pick the one that
+            # is NOT the coreference entity.
+            entity_bare = re.sub(r"^[Tt]he\s+", "", entity_span).strip().lower()
+            other_entity_bare: str | None = None
+            for m in re.finditer(r"\b[Tt]he\s+(\w+)", sentence):
+                candidate = m.group(1).lower()
+                if candidate != entity_bare:
+                    other_entity_bare = candidate
+                    break
+
+            option_a = entity_span.strip()           # the coreference entity → label A
+            option_b = (
+                f"the {other_entity_bare}" if other_entity_bare else "the other person"
             )
-        )
+
+            question = (
+                f"In the following sentence, who does \"{pronoun_span}\" refer to?\n\n"
+                f"\"{sentence}\""
+            )
+
+            records.append(
+                _format_fairness_record(
+                    task_name="winobias",
+                    question=question,
+                    options=[option_a.capitalize(), option_b.capitalize()],
+                    target_label="A",  # bracket span 1 is always the coreference answer
+                    group_id=group_id,
+                    metadata={
+                        "split": split_key,
+                        "entity": entity_span,
+                        "pronoun": pronoun_span,
+                        "other_entity": other_entity_bare,
+                        "sentence": sentence,
+                        "is_pro_stereotyped": is_pro,
+                    },
+                )
+            )
 
     if not records:
         raise RuntimeError(
-            "Could not load WinoGender records. "
-            "Set WINOGENDER_DATA_DIR to a folder containing all_sentences.tsv "
+            "Could not load WinoBias records. "
+            "Set WINOBIAS_DATA_DIR to a folder containing the WinoBias .txt files "
             "or ensure GitHub access is available."
         )
     return records
@@ -695,8 +738,8 @@ def load_fairness_training_dataset(
 
     if canonical == "bbq":
         records = _load_bbq_records()
-    elif canonical == "winogender":
-        records = _load_winogender_records()
+    elif canonical == "winobias":
+        records = _load_winobias_records()
     elif canonical == "difference_awareness":
         records = _load_difference_awareness_records()
     else:

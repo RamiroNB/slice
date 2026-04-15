@@ -21,7 +21,7 @@ MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-128}"
 TASK_EVAL_MAX_INPUT_LENGTH="${TASK_EVAL_MAX_INPUT_LENGTH:-256}"
 TASK_EVAL_MAX_NEW_TOKENS="${TASK_EVAL_MAX_NEW_TOKENS:-16}"
 
-CUDA_VISIBLE_DEVICES="${GPU}" python -m cl_lora.fairness_benchmark \
+CUDA_VISIBLE_DEVICES="${GPU}" python -m cl_lora.fairness.benchmark \
   --task bbq \
   --method "${METHOD}" \
   --run-name "${RUN_NAME}" \

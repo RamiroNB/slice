@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Dev smoke run for difference_awareness fairness benchmark.
+# Dev smoke run for WinoBias fairness benchmark.
+# WinoBias (Zhao et al., 2018): gender-occupation pronoun coreference.
+# ~3168 sentences split into pro/anti-stereotyped groups, no external data required.
+#
 # Usage:
-#   bash scripts/dummy_fairness_difference_awareness.sh
-#   DIFFERENCE_AWARENESS_DIR=/path/to/benchmark_suite bash scripts/dummy_fairness_difference_awareness.sh
+#   bash scripts/dummy_fairness_winobias.sh
+#   GPU=0 METHOD=slice bash scripts/dummy_fairness_winobias.sh
 
 GPU="${GPU:-0}"
 METHOD="${METHOD:-vanilla}"
-RUN_NAME="${RUN_NAME:-dummy_fairness_difference_awareness_dev01}"
+RUN_NAME="${RUN_NAME:-dummy_fairness_winobias_dev01}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-results/fairness_dev}"
 SEED="${SEED:-42}"
 RANK="${RANK:-16}"
@@ -22,7 +25,7 @@ TASK_EVAL_MAX_INPUT_LENGTH="${TASK_EVAL_MAX_INPUT_LENGTH:-256}"
 TASK_EVAL_MAX_NEW_TOKENS="${TASK_EVAL_MAX_NEW_TOKENS:-16}"
 
 CUDA_VISIBLE_DEVICES="${GPU}" python -m cl_lora.fairness.benchmark \
-  --task difference_awareness \
+  --task winobias \
   --method "${METHOD}" \
   --run-name "${RUN_NAME}" \
   --output-root "${OUTPUT_ROOT}" \

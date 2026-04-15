@@ -80,6 +80,41 @@ Resume an interrupted run:
 	  --output-dir outputs/single_task_demo \
 	  --save-merged-model
 
+## Standalone Fairness Benchmark (Initialization Tradeoff)
+
+This benchmark is separate from the continual-learning orchestrator.
+It reuses `train_on_task` and evaluates fairness-vs-accuracy for a single task/dataset run.
+
+Supported fairness tasks:
+
+- `bbq`
+- `crows_pairs`
+- `difference_awareness`
+
+Run a baseline smoke benchmark:
+
+	CUDA_VISIBLE_DEVICES=0 python -m cl_lora.fairness_benchmark \
+	  --task bbq \
+	  --method vanilla \
+	  --eval-size 64 \
+	  --task-eval-samples 64 \
+	  --run-name fairness_smoke_bbq
+
+Run with convenience script:
+
+	bash scripts/run_fairness.sh
+	GPU=0 TASK=crows_pairs METHOD=slice_proj_per_module bash scripts/run_fairness.sh
+
+Difference-awareness benchmark files can be loaded from local path by setting one of:
+
+	export DIFFERENCE_AWARENESS_DIR="/path/to/difference_awareness/benchmark_suite"
+	export DIFF_AWARENESS_DIR="/path/to/difference_awareness/benchmark_suite"
+
+Outputs are written to:
+
+- `results/fairness/<task>/<method>/<run_name>/run_summary.json`
+- `results/fairness/<task>/<method>/<run_name>/predictions.jsonl`
+
 ## Slice LoRA Initialization
 
 The slice initializer performs a backward pass over the current task data

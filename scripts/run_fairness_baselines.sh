@@ -23,7 +23,7 @@ TASK_EVAL_MAX_NEW_TOKENS="${TASK_EVAL_MAX_NEW_TOKENS:-32}"
 TASK_EVAL_MAX_INPUT_LENGTH="${TASK_EVAL_MAX_INPUT_LENGTH:-512}"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
-TASKS=("bbq" "winogender" "difference_awareness")
+TASKS=("bbq" "winobias" "difference_awareness")
 
 echo "============================================================"
 echo "Fairness base-model evaluation (zero-shot reference)"
@@ -43,7 +43,7 @@ for TASK in "${TASKS[@]}"; do
     echo "Output : ${OUTPUT_ROOT}/${TASK}/base_model/${RUN_NAME}/run_summary.json"
     echo "------------------------------------------------------------"
 
-    CUDA_VISIBLE_DEVICES="${GPU}" python -m cl_lora.fairness_benchmark \
+    CUDA_VISIBLE_DEVICES="${GPU}" python -m cl_lora.fairness.benchmark \
         --task "${TASK}" \
         --base-model-eval \
         --run-name "${RUN_NAME}" \

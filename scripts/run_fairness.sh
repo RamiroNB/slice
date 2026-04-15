@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Standalone fairness-vs-accuracy benchmark runner.
 #
-# Supported tasks: bbq, difference_awareness
+# Supported tasks: bbq, winobias, difference_awareness
 #
 # Usage:
 #   bash scripts/run_fairness.sh
@@ -30,7 +30,7 @@ BASE_MODEL_EVAL="${BASE_MODEL_EVAL:-0}"
 EXTRA_ARGS=("$@")
 
 CMD=(
-  python -m cl_lora.fairness_benchmark
+  python -m cl_lora.fairness.benchmark
   --task "${TASK}"
   --output-root "${OUTPUT_ROOT}"
   --seed "${SEED}"

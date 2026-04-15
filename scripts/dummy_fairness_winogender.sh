@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED: WinoGender has been replaced by WinoBias (larger, same coreference task).
+# Use scripts/dummy_fairness_winobias.sh instead.
+echo "ERROR: WinoGender is no longer supported. Use dummy_fairness_winobias.sh instead." >&2
+exit 1
+
+# (original content preserved below for reference)
 # Dev smoke run for WinoGender fairness benchmark.
 # WinoGender (Rudinger et al., 2018): gender-occupation pronoun coreference.
 # 720 sentences, 3 pronoun types (male/female/neutral), no external data required.
@@ -24,7 +30,7 @@ MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-128}"
 TASK_EVAL_MAX_INPUT_LENGTH="${TASK_EVAL_MAX_INPUT_LENGTH:-256}"
 TASK_EVAL_MAX_NEW_TOKENS="${TASK_EVAL_MAX_NEW_TOKENS:-16}"
 
-CUDA_VISIBLE_DEVICES="${GPU}" python -m cl_lora.fairness_benchmark \
+CUDA_VISIBLE_DEVICES="${GPU}" python -m cl_lora.fairness.benchmark \
   --task winogender \
   --method "${METHOD}" \
   --run-name "${RUN_NAME}" \

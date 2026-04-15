@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .fairness_eval import evaluate_fairness_task
-    from .train import MODEL_NAME, HF_TOKEN, build_tokenizer, load_base_model, train_on_task
+    from .eval import evaluate_fairness_task
+    from ..train import MODEL_NAME, HF_TOKEN, build_tokenizer, load_base_model, train_on_task
 except ImportError:
-    from fairness_eval import evaluate_fairness_task
+    from eval import evaluate_fairness_task
     from train import MODEL_NAME, HF_TOKEN, build_tokenizer, load_base_model, train_on_task
 
 
@@ -176,7 +176,7 @@ def main() -> None:
     parser.add_argument(
         "--task",
         default="bbq",
-        choices=["bbq", "fairness_bbq", "winogender", "wino_gender", "difference_awareness"],
+        choices=["bbq", "fairness_bbq", "winobias", "wino_bias", "difference_awareness"],
         help="Fairness task alias to train/evaluate.",
     )
     parser.add_argument(
