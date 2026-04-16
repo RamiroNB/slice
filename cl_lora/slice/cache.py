@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -90,3 +91,48 @@ def save_slice_cache(
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, sort_keys=True, indent=2)
     logger.info("Saved slice cache to %s with %d modules", root_dir, len(entry.inits))
+
+
+def save_ab_stats_csv(
+    cache_dir: str,
+    cache_key: str,
+    inits: Dict[str, Dict[str, torch.Tensor]],
+) -> str:
+    root_dir = os.path.join(cache_dir, cache_key)
+    os.makedirs(root_dir, exist_ok=True)
+    out_path = os.path.join(root_dir, "ab_stats.csv")
+
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["module", "tensor", "shape", "mean", "var", "min", "max"])
+
+        for module_name in sorted(inits.keys()):
+            ab = inits[module_name]
+            for tensor_name in ("A", "B"):
+                t = ab[tensor_name].detach().float()
+                writer.writerow([
+                    module_name,
+                    tensor_name,
+                    "x".join(str(d) for d in t.shape),
+                    float(t.mean().item()),
+                    float(t.var(unbiased=False).item()),
+                    float(t.min().item()),
+                    float(t.max().item()),
+                ])
+
+    logger.info("Saved A/B summary CSV: %s", out_path)
+    return out_path
+
+
+def save_projection_stats_json(
+    cache_dir: str,
+    cache_key: str,
+    projection_stats: Dict[str, Any],
+) -> str:
+    root_dir = os.path.join(cache_dir, cache_key)
+    os.makedirs(root_dir, exist_ok=True)
+    out_path = os.path.join(root_dir, "projection_stats.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(projection_stats, f, sort_keys=True, indent=2)
+    logger.info("Saved projection stats JSON: %s", out_path)
+    return out_path

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -91,12 +91,22 @@ def project_forget_gradients(
     *,
     global_projection: bool = False,
     add_retain_grad: bool = False,
-) -> Dict[str, torch.Tensor]:
+    return_stats: bool = False,
+) -> Dict[str, torch.Tensor] | Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
     """Project forget gradients against retain gradients (LInMU-style)."""
     projected: Dict[str, torch.Tensor] = {}
     eps = 1e-12
+    stats: Dict[str, Any] = {
+        "mode": "global" if global_projection else "per_module",
+        "add_retain_grad": bool(add_retain_grad),
+        "eps": float(eps),
+        "modules": {},
+    }
 
     if not grads_forget:
+        if return_stats:
+            stats["status"] = "empty_forget_grads"
+            return projected, stats
         return projected
 
     if not global_projection:
@@ -104,6 +114,9 @@ def project_forget_gradients(
             g_r = grads_retain.get(name)
             if g_r is None:
                 projected[name] = g_f
+                stats["modules"][name] = {
+                    "status": "missing_retain_grad",
+                }
                 continue
 
             original_shape = g_f.shape
@@ -119,6 +132,16 @@ def project_forget_gradients(
             if add_retain_grad:
                 g_f_new = g_f_new + g_r.to(device=g_f_new.device, dtype=g_f_new.dtype)
             projected[name] = g_f_new.to(g_f.dtype)
+            stats["modules"][name] = {
+                "status": "projected",
+                "dot": float(dot.item()),
+                "denom": float(denom.item()),
+                "dot_clipped": float(dot_clipped.item()),
+                "gamma": float(gamma.item()),
+                "forget_norm": float(g_f_flat.norm().item()),
+                "retain_norm": float(g_r_flat.norm().item()),
+                "projected_norm": float(g_f_new.float().view(-1).norm().item()),
+            }
     else:
         first_name = next(iter(grads_forget.keys()))
         device = grads_forget[first_name].device
@@ -136,11 +159,20 @@ def project_forget_gradients(
 
         dot_clipped = torch.relu(-global_dot)
         gamma = dot_clipped / (global_denom + eps)
+        stats["global"] = {
+            "dot": float(global_dot.item()),
+            "denom": float(global_denom.item()),
+            "dot_clipped": float(dot_clipped.item()),
+            "gamma": float(gamma.item()),
+        }
 
         for name, g_f in grads_forget.items():
             g_r = grads_retain.get(name)
             if g_r is None:
                 projected[name] = g_f
+                stats["modules"][name] = {
+                    "status": "missing_retain_grad",
+                }
                 continue
 
             original_shape = g_f.shape
@@ -150,5 +182,16 @@ def project_forget_gradients(
             if add_retain_grad:
                 g_f_new = g_f_new + g_r.to(device=g_f_new.device, dtype=g_f_new.dtype)
             projected[name] = g_f_new.to(g_f.dtype)
+            stats["modules"][name] = {
+                "status": "projected",
+                "dot": float(torch.dot(g_f_flat, g_r_flat).item()),
+                "denom": float(torch.dot(g_r_flat, g_r_flat).item()),
+                "gamma": float(gamma.item()),
+                "forget_norm": float(g_f_flat.norm().item()),
+                "retain_norm": float(g_r_flat.norm().item()),
+                "projected_norm": float(g_f_new.float().view(-1).norm().item()),
+            }
 
+    if return_stats:
+        return projected, stats
     return projected

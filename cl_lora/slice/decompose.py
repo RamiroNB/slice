@@ -6,7 +6,7 @@ from typing import Dict
 import torch
 
 
-def build_ab_from_gradient(G: torch.Tensor, r: int) -> Dict[str, torch.Tensor]:
+def build_ab_from_gradient(G: torch.Tensor, r: int, weight_var: float) -> Dict[str, torch.Tensor]:
     """Decompose a gradient matrix into LoRA A/B via low-rank SVD (LoRA-GA style)."""
     device = G.device
     d_out, d_in = G.shape
@@ -21,9 +21,17 @@ def build_ab_from_gradient(G: torch.Tensor, r: int) -> Dict[str, torch.Tensor]:
     B = U[:, :r]
     A = Vt[r : 2 * r, :]
 
-    scale_ga = (d_out ** 0.25) / (64 ** 0.5)
-    B = B * scale_ga
-    A = A * scale_ga
+    # Match LoRAM rescaling: variance-matched scaling using rho/variance_ratio/beta.
+    eps = 1e-12
+    recon = B @ A
+    var_recon = float(torch.var(recon).item()) if torch.var(recon).item() != 0.0 else eps
+    variance_ratio = float(weight_var) / (var_recon + eps)
+    min_dim = max(2, min(d_out, d_in))
+    r_val = max(2, r)
+    rho = math.log(r_val, min_dim)
+    beta = math.pow(max(rho * variance_ratio, eps), 1.0 / 4.0)
+    B = B * beta
+    A = A * beta
 
     return {
         "A": A.to(device=device, dtype=G.dtype).contiguous(),

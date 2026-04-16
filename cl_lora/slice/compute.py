@@ -1,20 +1,46 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 
 import torch
 from datasets import concatenate_datasets
 
 from ..lora_config import build_lora_config
 from ..load_dataset import load_training_dataset
-from .cache import SliceCacheEntry, load_slice_cache, make_cache_key, save_slice_cache
+from .cache import (
+    SliceCacheEntry,
+    load_slice_cache,
+    make_cache_key,
+    save_ab_stats_csv,
+    save_projection_stats_json,
+    save_slice_cache,
+)
 from .config import SliceInitConfig
 from .decompose import build_ab_from_gradient, build_ab_loram
 from .gradients import accumulate_gradients, combine_grads, project_forget_gradients
 from .utils import build_dataloader, model_device, target_weight_params, tokenize_dataset
 
 logger = logging.getLogger("cl_lora.slice.compute")
+
+
+def _lora_ga_incompatible_flags(config: SliceInitConfig) -> List[str]:
+    invalid_flags: List[str] = []
+    if bool(config.grad_project):
+        invalid_flags.append("grad_project")
+    if bool(config.add_retain_grad):
+        invalid_flags.append("add_retain_grad")
+    if config.retain_batch_size is not None:
+        invalid_flags.append("retain_batch_size")
+    if config.retain_grad_accum is not None:
+        invalid_flags.append("retain_grad_accum")
+    if str(config.retain_batch_size_set) != "all_tasks":
+        invalid_flags.append("retain_batch_size_set")
+    if bool(config.single_retain_task_mode):
+        invalid_flags.append("single_retain_task_mode")
+    if float(config.retain_scale) != 1.0:
+        invalid_flags.append("retain_scale")
+    return invalid_flags
 
 
 def compute_loram_inits(
@@ -50,7 +76,18 @@ def compute_slice_inits(
     retain_tasks=None,
     *,
     config: SliceInitConfig,
-) -> Dict[str, Dict[str, torch.Tensor]]:
+) -> Tuple[Dict[str, Dict[str, torch.Tensor]], Dict[str, Any]]:
+    if config.init_method == "lora_ga":
+        # Hard guard to avoid accidental retain/projection usage with LoRA-GA.
+        invalid_flags = _lora_ga_incompatible_flags(config)
+
+        if invalid_flags:
+            raise ValueError(
+                "init_method='lora_ga' is incompatible with retain/projection settings: "
+                f"{', '.join(invalid_flags)}. "
+                "Use init_method='slice' for retain-gradient projection."
+            )
+
     # LoRA-GA baseline: ignore retain tasks entirely
     if config.init_method == "lora_ga":
         retain_tasks = []
@@ -172,28 +209,43 @@ def compute_slice_inits(
             "global" if global_projection else "per_module",
             config.add_retain_grad,
         )
-        combined = project_forget_gradients(
+        combined, projection_stats = project_forget_gradients(
             grads_forget=grads_f,
             grads_retain=grads_r,
             global_projection=global_projection,
             add_retain_grad=config.add_retain_grad,
+            return_stats=True,
         )
+        projection_stats["applied"] = True
         logger.info("Built projected gradient matrix for %d modules", len(combined))
     elif config.grad_project and grads_r is None:
         logger.info("grad_project=True but no retain task provided; using forget gradients without projection")
         combined = grads_f
+        projection_stats = {
+            "applied": False,
+            "reason": "grad_project_true_but_no_retain_grads",
+            "mode": str(config.grad_projection_mode),
+            "gamma": None,
+        }
     else:
         combined = combine_grads(grads_f, grads_r, config.retain_scale)
         logger.info("Built combined gradient matrix for %d modules (retain_scale=%s)", len(combined), config.retain_scale)
+        projection_stats = {
+            "applied": False,
+            "reason": "grad_project_disabled",
+            "mode": "none",
+            "gamma": None,
+        }
 
     r_use = config.rank or int(getattr(lora_cfg, "r", 8))
     inits = {}
     for name, g in combined.items():
         logger.debug("Building A/B for module %s: G_shape=%s r=%d", name, tuple(g.shape), r_use)
-        ab = build_ab_from_gradient(g, r=r_use)
+        weight_var = float(target_params[name].detach().float().var().item())
+        ab = build_ab_from_gradient(g, r=r_use, weight_var=weight_var)
         logger.debug("Built A/B for %s: A_shape=%s B_shape=%s", name, tuple(ab['A'].shape), tuple(ab['B'].shape))
         inits[name] = ab
-    return inits
+    return inits, projection_stats
 
 
 def _task_fingerprint(task_obj) -> Optional[Dict[str, object]]:
@@ -220,6 +272,16 @@ def load_or_compute_slice_inits(
     *,
     config: SliceInitConfig,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
+    if config.init_method == "lora_ga":
+        # Enforce guard before cache lookup so incompatible settings cannot be hidden by cache hits.
+        invalid_flags = _lora_ga_incompatible_flags(config)
+        if invalid_flags:
+            raise ValueError(
+                "init_method='lora_ga' is incompatible with retain/projection settings: "
+                f"{', '.join(invalid_flags)}. "
+                "Use init_method='slice' for retain-gradient projection."
+            )
+
     lora_cfg = build_lora_config(r=int(config.rank or 128))
     lora_payload = {
         "r": int(getattr(lora_cfg, "r", 0) or 0),
@@ -230,24 +292,26 @@ def load_or_compute_slice_inits(
         "target_modules": list(getattr(lora_cfg, "target_modules", []) or []),
     }
 
+    is_lora_ga = (config.init_method == "lora_ga")
     payload = {
         "init_method": config.init_method,
         "cache_context": config.cache_context,
         "forget_task": _task_fingerprint(forget_task),
-        "retain_tasks": [_task_fingerprint(rt) for rt in (retain_tasks or [])] or None,
+        # Canonicalize LoRA-GA cache identity: retain tasks are ignored by design.
+        "retain_tasks": None if is_lora_ga else ([_task_fingerprint(rt) for rt in (retain_tasks or [])] or None),
         "rank": config.rank,
         "seed": config.seed,
         "max_seq_length": config.max_seq_length,
         "max_steps": config.max_steps,
         "batch_size": config.per_device_batch_size,
-        "retain_scale": config.retain_scale,
-        "grad_project": config.grad_project,
-        "grad_projection_mode": config.grad_projection_mode,
-        "add_retain_grad": config.add_retain_grad,
-        "retain_batch_size": config.retain_batch_size,
-        "retain_grad_accum": config.retain_grad_accum,
-        "retain_batch_size_set": config.retain_batch_size_set,
-        "single_retain_task_mode": config.single_retain_task_mode,
+        "retain_scale": 1.0 if is_lora_ga else config.retain_scale,
+        "grad_project": False if is_lora_ga else config.grad_project,
+        "grad_projection_mode": "per_module" if is_lora_ga else config.grad_projection_mode,
+        "add_retain_grad": False if is_lora_ga else config.add_retain_grad,
+        "retain_batch_size": None if is_lora_ga else config.retain_batch_size,
+        "retain_grad_accum": None if is_lora_ga else config.retain_grad_accum,
+        "retain_batch_size_set": "all_tasks" if is_lora_ga else config.retain_batch_size_set,
+        "single_retain_task_mode": False if is_lora_ga else config.single_retain_task_mode,
         "lora": lora_payload,
         "model": {
             "class": model.__class__.__name__,
@@ -256,14 +320,21 @@ def load_or_compute_slice_inits(
     cache_key = make_cache_key(payload)
     cached = load_slice_cache(config.cache_dir, cache_key, device=model_device(model))
     if cached is not None:
+        save_ab_stats_csv(config.cache_dir, cache_key, cached.inits)
         logger.info("Slice cache hit: cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(cached.inits))
         return cached.inits
     logger.info("Slice cache miss: will compute inits (cache_dir=%s cache_key=%s)", config.cache_dir, cache_key)
 
     if config.init_method == "loram":
         inits = compute_loram_inits(model=model, config=config)
+        projection_stats = {
+            "applied": False,
+            "reason": "init_method_loram",
+            "mode": "none",
+            "gamma": None,
+        }
     else:
-        inits = compute_slice_inits(
+        inits, projection_stats = compute_slice_inits(
             model=model,
             tokenizer=tokenizer,
             forget_task=forget_task,
@@ -277,5 +348,7 @@ def load_or_compute_slice_inits(
         SliceCacheEntry(inits=inits),
         meta={"payload": payload},
     )
+    save_ab_stats_csv(config.cache_dir, cache_key, inits)
+    save_projection_stats_json(config.cache_dir, cache_key, projection_stats)
     logger.info("Saved slice cache: cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(inits))
     return inits
