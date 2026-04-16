@@ -6,8 +6,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+datasets_cache/
+plots/
 results/
+slice_cache_diag/
 
 .vscode/
 outputs/
