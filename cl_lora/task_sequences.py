@@ -323,6 +323,205 @@ NI024 = SuperNITask(
 
 
 # ---------------------------------------------------------------------------
+# Diverse extension pool — tasks NOT in the original 26, chosen to cover
+# categorically different output spaces (code, math, non-English, toxicity,
+# grammar, word-level, entailment, stance, creative).  These are used for
+# the DIVERSE_SEARCH_POOL gradient-conflict search.
+# ---------------------------------------------------------------------------
+
+# --- Code / SQL generation ---
+NI077 = SuperNITask(
+    ni_id="NI077",
+    name="task077_splash_explanation_to_sql",
+    source="Splash",
+    category="generation",
+    hf_config="task077_splash_explanation_to_sql",
+)
+NI079 = SuperNITask(
+    ni_id="NI079",
+    name="task079_conala_concat_strings",
+    source="CoNaLa",
+    category="generation",
+    hf_config="task079_conala_concat_strings",
+)
+
+# --- Math / arithmetic / program execution ---
+NI085 = SuperNITask(
+    ni_id="NI085",
+    name="task085_unnatural_addsub_arithmetic",
+    source="Unnatural AddSub",
+    category="generation",
+    hf_config="task085_unnatural_addsub_arithmetic",
+)
+NI088 = SuperNITask(
+    ni_id="NI088",
+    name="task088_identify_typo_verification",
+    source="Typo Verification",
+    category="classification",
+    hf_config="task088_identify_typo_verification",
+)
+NI090 = SuperNITask(
+    ni_id="NI090",
+    name="task090_equation_learner_algebra",
+    source="Equation Learner",
+    category="generation",
+    hf_config="task090_equation_learner_algebra",
+)
+NI092 = SuperNITask(
+    ni_id="NI092",
+    name="task092_check_prime_classification",
+    source="Check Prime",
+    category="classification",
+    hf_config="task092_check_prime_classification",
+)
+NI161 = SuperNITask(
+    ni_id="NI161",
+    name="task161_count_words_containing_letter",
+    source="Synthetic Counting",
+    category="generation",
+    hf_config="task161_count_words_containing_letter",
+)
+NI205 = SuperNITask(
+    ni_id="NI205",
+    name="task205_remove_even_elements",
+    source="Synthetic List Processing",
+    category="generation",
+    hf_config="task205_remove_even_elements",
+)
+NI376 = SuperNITask(
+    ni_id="NI376",
+    name="task376_reverse_order_of_words",
+    source="Synthetic Word Reversal",
+    category="generation",
+    hf_config="task376_reverse_order_of_words",
+)
+NI1332 = SuperNITask(
+    ni_id="NI1332",
+    name="task1332_check_leap_year",
+    source="Leap Year Check",
+    category="classification",
+    hf_config="task1332_check_leap_year",
+)
+
+# --- Non-English translation ---
+NI271 = SuperNITask(
+    ni_id="NI271",
+    name="task271_europarl_translation",
+    source="Europarl (BG→EN)",
+    category="generation",
+    hf_config="task271_europarl_translation",
+)
+NI425 = SuperNITask(
+    ni_id="NI425",
+    name="task425_hindienglish_corpora_en_hi_translation",
+    source="HindiEnglish Corpora",
+    category="generation",
+    hf_config="task425_hindienglish_corpora_en_hi_translation",
+)
+
+# --- Toxicity / safety classification ---
+NI286 = SuperNITask(
+    ni_id="NI286",
+    name="task286_olid_offense_judgment",
+    source="OLID",
+    category="classification",
+    hf_config="task286_olid_offense_judgment",
+)
+NI325 = SuperNITask(
+    ni_id="NI325",
+    name="task325_jigsaw_classification_identity_attack",
+    source="Jigsaw Toxicity",
+    category="classification",
+    hf_config="task325_jigsaw_classification_identity_attack",
+)
+NI327 = SuperNITask(
+    ni_id="NI327",
+    name="task327_jigsaw_classification_toxic",
+    source="Jigsaw Toxicity",
+    category="classification",
+    hf_config="task327_jigsaw_classification_toxic",
+)
+
+# --- Grammar / spelling ---
+NI1346 = SuperNITask(
+    ni_id="NI1346",
+    name="task1346_glue_cola_grammatical_correctness_classification",
+    source="GLUE CoLA",
+    category="classification",
+    hf_config="task1346_glue_cola_grammatical_correctness_classification",
+)
+
+# --- Word-level semantic relations ---
+NI1152 = SuperNITask(
+    ni_id="NI1152",
+    name="task1152_bard_analogical_reasoning_causation",
+    source="BARD Analogical Reasoning",
+    category="generation",
+    hf_config="task1152_bard_analogical_reasoning_causation",
+)
+NI1429 = SuperNITask(
+    ni_id="NI1429",
+    name="task1429_evalution_semantic_relation_classification",
+    source="Evalution Semantic Relations",
+    category="classification",
+    hf_config="task1429_evalution_semantic_relation_classification",
+)
+NI1582 = SuperNITask(
+    ni_id="NI1582",
+    name="task1582_bless_hypernym_generation",
+    source="BLESS",
+    category="generation",
+    hf_config="task1582_bless_hypernym_generation",
+)
+
+# --- Entailment / stance / emotion ---
+NI199 = SuperNITask(
+    ni_id="NI199",
+    name="task199_mnli_classification",
+    source="MNLI",
+    category="classification",
+    hf_config="task199_mnli_classification",
+)
+NI209 = SuperNITask(
+    ni_id="NI209",
+    name="task209_stancedetection_classification",
+    source="Debatepedia Stance",
+    category="classification",
+    hf_config="task209_stancedetection_classification",
+)
+NI513 = SuperNITask(
+    ni_id="NI513",
+    name="task513_argument_stance_classification",
+    source="Argument Stance",
+    category="classification",
+    hf_config="task513_argument_stance_classification",
+)
+NI517 = SuperNITask(
+    ni_id="NI517",
+    name="task517_emo_classify_emotion_of_dialogue",
+    source="EMO Dialogue Emotion",
+    category="classification",
+    hf_config="task517_emo_classify_emotion_of_dialogue",
+)
+
+# --- Creative / phonetic generation ---
+NI183 = SuperNITask(
+    ni_id="NI183",
+    name="task183_rhyme_generation",
+    source="Rhyme Generation",
+    category="generation",
+    hf_config="task183_rhyme_generation",
+)
+NI1711 = SuperNITask(
+    ni_id="NI1711",
+    name="task1711_poki_text_generation",
+    source="POKI Poem Generation",
+    category="generation",
+    hf_config="task1711_poki_text_generation",
+)
+
+
+# ---------------------------------------------------------------------------
 # TRACE task definitions
 # (6 of 8 tasks selected by the paper)
 # ---------------------------------------------------------------------------
@@ -419,13 +618,25 @@ SEQUENCES = {
         description="Mixed sequence 2: Sentiment140 → Mutual → StoryCommonsense → SyntheticExec → CosmosQA",
     ),
    
-    "NI-Seq-Opposite": Sequence(
-        name="NI-Seq-Opposite",
+    # NI-Seq-Opposite-v1: searched over original 26 NI tasks (325 pairs).
+    # NI-Seq-Opposite-v2: searched over 51-task diverse pool (1275 pairs) —
+    #   lower mean cosine, more likely to trigger SLICE projection.
+    "NI-Seq-Opposite-v1": Sequence(
+        name="NI-Seq-Opposite-v1",
         task_type="mixed",
         tasks=[NI141, NI1510, NI360, NI363, NI611],
         description=(
-            "Most-opposite 5-task subset (mean global_cosine=+0.2801): "
+            "Most-opposite 5-task subset from 26-task pool (mean global_cosine=+0.2801): "
             "OddManOut → Evalution → Spolin → SST2 → Mutual"
+        ),
+    ),
+    "NI-Seq-Opposite-v2": Sequence(
+        name="NI-Seq-Opposite-v2",
+        task_type="mixed",
+        tasks=[NI088, NI090, NI1510, NI363, NI611],
+        description=(
+            "Most-opposite 5-task subset from 51-task diverse pool (mean global_cosine=+0.2354): "
+            "TypoCheck → Algebra → Evalution → SST2 → Mutual"
         ),
     ),
     "NI-Seq-Dummy": Sequence(
