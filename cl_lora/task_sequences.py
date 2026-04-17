@@ -418,6 +418,16 @@ SEQUENCES = {
         tasks=[NI195, NI611, NI292, NI488, NI024],
         description="Mixed sequence 2: Sentiment140 → Mutual → StoryCommonsense → SyntheticExec → CosmosQA",
     ),
+   
+    "NI-Seq-Opposite": Sequence(
+        name="NI-Seq-Opposite",
+        task_type="mixed",
+        tasks=[NI141, NI1510, NI360, NI363, NI611],
+        description=(
+            "Most-opposite 5-task subset (mean global_cosine=+0.2801): "
+            "OddManOut → Evalution → Spolin → SST2 → Mutual"
+        ),
+    ),
     "NI-Seq-Dummy": Sequence(
         name="NI-Seq-Dummy",
         task_type="mixed",
