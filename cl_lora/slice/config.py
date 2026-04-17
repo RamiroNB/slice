@@ -14,6 +14,7 @@ class SliceInitConfig:
     retain_scale: float = 1.0
     grad_project: bool = False
     grad_projection_mode: str = "per_module"
+    grad_project_always: bool = False
     add_retain_grad: bool = False
     rank: Optional[int] = None
     max_seq_length: int = 256

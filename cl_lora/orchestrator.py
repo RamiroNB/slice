@@ -147,6 +147,7 @@ def run_sequence(
     slice_retain_scale: float,
     slice_grad_project: bool,
     slice_grad_projection_mode: str,
+    slice_grad_project_always: bool,
     slice_add_retain_grad: bool,
     slice_retain_batch_size: int | None = None,
     slice_retain_grad_accum: int | None = None,
@@ -180,6 +181,7 @@ def run_sequence(
         "slice_retain_scale": float(slice_retain_scale),
         "slice_grad_project": bool(slice_grad_project),
         "slice_grad_projection_mode": str(slice_grad_projection_mode),
+        "slice_grad_project_always": bool(slice_grad_project_always),
         "slice_add_retain_grad": bool(slice_add_retain_grad),
         "slice_retain_batch_size": slice_retain_batch_size,
         "slice_retain_grad_accum": slice_retain_grad_accum,
@@ -300,6 +302,7 @@ def run_sequence(
             slice_retain_scale=slice_retain_scale,
             slice_grad_project=slice_grad_project,
             slice_grad_projection_mode=slice_grad_projection_mode,
+            slice_grad_project_always=slice_grad_project_always,
             slice_add_retain_grad=slice_add_retain_grad,
             slice_retain_batch_size=slice_retain_batch_size,
             slice_retain_grad_accum=slice_retain_grad_accum,
@@ -438,6 +441,11 @@ def main() -> None:
         help="Projection mode when --slice-grad-project is enabled.",
     )
     parser.add_argument(
+        "--slice-grad-project-always",
+        action="store_true",
+        help="Use OGD-style projection: always remove retain-gradient component (no conflict gating).",
+    )
+    parser.add_argument(
         "--slice-add-retain-grad",
         action="store_true",
         help="Add retain gradient after projection when --slice-grad-project is enabled.",
@@ -536,6 +544,7 @@ def main() -> None:
         slice_retain_scale=args.slice_retain_scale,
         slice_grad_project=args.slice_grad_project,
         slice_grad_projection_mode=args.slice_grad_projection_mode,
+        slice_grad_project_always=args.slice_grad_project_always,
         slice_add_retain_grad=args.slice_add_retain_grad,
         slice_retain_batch_size=args.slice_retain_batch_size,
         slice_retain_grad_accum=args.slice_retain_grad_accum,

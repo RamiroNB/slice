@@ -28,6 +28,7 @@ RUN_SUFFIX="${RUN_SUFFIX:-full_eval}"
 SLICE_CACHE_DIR="${SLICE_CACHE_DIR:-slice_cache}"
 SLICE_MAX_STEPS="${SLICE_MAX_STEPS:-64}"
 SLICE_GRAD_PROJECTION_MODE="${SLICE_GRAD_PROJECTION_MODE:-global}"
+SLICE_GRAD_PROJECT_ALWAYS="${SLICE_GRAD_PROJECT_ALWAYS:-0}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 EXTRA_ARGS=("$@")
@@ -67,6 +68,10 @@ run_lora_ga_sequence() {
 run_slice_sequence() {
 	local sequence_name="$1"
 	local run_name="$2"
+	local ogd_always_flag=()
+	if [[ "${SLICE_GRAD_PROJECT_ALWAYS}" == "1" ]]; then
+		ogd_always_flag=(--slice-grad-project-always)
+	fi
 
 	echo "============================================================"
 	echo "Baseline  : Slice"
@@ -92,6 +97,7 @@ run_slice_sequence() {
 			--slice-max-steps "${SLICE_MAX_STEPS}" \
 			--slice-grad-project \
 			--slice-grad-projection-mode "${SLICE_GRAD_PROJECTION_MODE}" \
+			"${ogd_always_flag[@]}" \
 			--slice-retain-batch-size-set each_task \
 			--general-eval-strategy final_only \
 			--seen-eval-strategy diagonal_final \

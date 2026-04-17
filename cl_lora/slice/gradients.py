@@ -90,6 +90,7 @@ def project_forget_gradients(
     grads_retain: Dict[str, torch.Tensor],
     *,
     global_projection: bool = False,
+    always_project: bool = False,
     add_retain_grad: bool = False,
     return_stats: bool = False,
 ) -> Dict[str, torch.Tensor] | Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
@@ -98,6 +99,7 @@ def project_forget_gradients(
     eps = 1e-12
     stats: Dict[str, Any] = {
         "mode": "global" if global_projection else "per_module",
+        "always_project": bool(always_project),
         "add_retain_grad": bool(add_retain_grad),
         "eps": float(eps),
         "modules": {},
@@ -125,8 +127,9 @@ def project_forget_gradients(
 
             dot = torch.dot(g_f_flat, g_r_flat)
             denom = torch.dot(g_r_flat, g_r_flat)
-            dot_clipped = torch.relu(-dot)
-            gamma = dot_clipped / (denom + eps)
+            # OGD-style: always remove the retain-direction component.
+            projection_numerator = -dot if always_project else torch.relu(-dot)
+            gamma = projection_numerator / (denom + eps)
 
             g_f_new = (g_f_flat + gamma * g_r_flat).view(original_shape)
             if add_retain_grad:
@@ -136,7 +139,8 @@ def project_forget_gradients(
                 "status": "projected",
                 "dot": float(dot.item()),
                 "denom": float(denom.item()),
-                "dot_clipped": float(dot_clipped.item()),
+                "dot_clipped": float(projection_numerator.item()),
+                "projection_numerator": float(projection_numerator.item()),
                 "gamma": float(gamma.item()),
                 "forget_norm": float(g_f_flat.norm().item()),
                 "retain_norm": float(g_r_flat.norm().item()),
@@ -157,12 +161,13 @@ def project_forget_gradients(
             global_dot = global_dot + torch.dot(g_f_flat, g_r_flat)
             global_denom = global_denom + torch.dot(g_r_flat, g_r_flat)
 
-        dot_clipped = torch.relu(-global_dot)
-        gamma = dot_clipped / (global_denom + eps)
+        projection_numerator = -global_dot if always_project else torch.relu(-global_dot)
+        gamma = projection_numerator / (global_denom + eps)
         stats["global"] = {
             "dot": float(global_dot.item()),
             "denom": float(global_denom.item()),
-            "dot_clipped": float(dot_clipped.item()),
+            "dot_clipped": float(projection_numerator.item()),
+            "projection_numerator": float(projection_numerator.item()),
             "gamma": float(gamma.item()),
         }
 

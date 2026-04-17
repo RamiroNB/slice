@@ -28,6 +28,8 @@ def _lora_ga_incompatible_flags(config: SliceInitConfig) -> List[str]:
     invalid_flags: List[str] = []
     if bool(config.grad_project):
         invalid_flags.append("grad_project")
+    if bool(config.grad_project_always):
+        invalid_flags.append("grad_project_always")
     if bool(config.add_retain_grad):
         invalid_flags.append("add_retain_grad")
     if config.retain_batch_size is not None:
@@ -205,14 +207,16 @@ def compute_slice_inits(
     if config.grad_project and grads_r is not None:
         global_projection = str(config.grad_projection_mode).lower() == "global"
         logger.info(
-            "Projecting slice gradients (mode=%s, add_retain_grad=%s)",
+            "Projecting slice gradients (mode=%s, always_project=%s, add_retain_grad=%s)",
             "global" if global_projection else "per_module",
+            config.grad_project_always,
             config.add_retain_grad,
         )
         combined, projection_stats = project_forget_gradients(
             grads_forget=grads_f,
             grads_retain=grads_r,
             global_projection=global_projection,
+            always_project=config.grad_project_always,
             add_retain_grad=config.add_retain_grad,
             return_stats=True,
         )
@@ -225,6 +229,7 @@ def compute_slice_inits(
             "applied": False,
             "reason": "grad_project_true_but_no_retain_grads",
             "mode": str(config.grad_projection_mode),
+            "always_project": bool(config.grad_project_always),
             "gamma": None,
         }
     else:
@@ -234,6 +239,7 @@ def compute_slice_inits(
             "applied": False,
             "reason": "grad_project_disabled",
             "mode": "none",
+            "always_project": bool(config.grad_project_always),
             "gamma": None,
         }
 
@@ -307,6 +313,7 @@ def load_or_compute_slice_inits(
         "retain_scale": 1.0 if is_lora_ga else config.retain_scale,
         "grad_project": False if is_lora_ga else config.grad_project,
         "grad_projection_mode": "per_module" if is_lora_ga else config.grad_projection_mode,
+        "grad_project_always": False if is_lora_ga else config.grad_project_always,
         "add_retain_grad": False if is_lora_ga else config.add_retain_grad,
         "retain_batch_size": None if is_lora_ga else config.retain_batch_size,
         "retain_grad_accum": None if is_lora_ga else config.retain_grad_accum,

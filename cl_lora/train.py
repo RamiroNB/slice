@@ -122,6 +122,7 @@ def train_on_task(
     slice_retain_scale: float = 1.0,
     slice_grad_project: bool = False,
     slice_grad_projection_mode: str = "per_module",
+    slice_grad_project_always: bool = False,
     slice_add_retain_grad: bool = False,
     slice_cache_context: str | None = None,
     slice_retain_batch_size: int | None = None,
@@ -158,6 +159,7 @@ def train_on_task(
             retain_scale=slice_retain_scale,
             grad_project=slice_grad_project,
             grad_projection_mode=slice_grad_projection_mode,
+            grad_project_always=slice_grad_project_always,
             add_retain_grad=slice_add_retain_grad,
             rank=rank,
             max_seq_length=max_seq_length,
@@ -316,6 +318,11 @@ def main() -> None:
         help="Projection mode when --slice-grad-project is enabled.",
     )
     parser.add_argument(
+        "--slice-grad-project-always",
+        action="store_true",
+        help="Use OGD-style projection: always remove retain-gradient component (no conflict gating).",
+    )
+    parser.add_argument(
         "--slice-add-retain-grad",
         action="store_true",
         help="Add retain gradient after projection when --slice-grad-project is enabled.",
@@ -355,6 +362,7 @@ def main() -> None:
         slice_retain_scale=args.slice_retain_scale,
         slice_grad_project=args.slice_grad_project,
         slice_grad_projection_mode=args.slice_grad_projection_mode,
+        slice_grad_project_always=args.slice_grad_project_always,
         slice_add_retain_grad=args.slice_add_retain_grad,
         slice_retain_batch_size=args.slice_retain_batch_size,
         slice_retain_grad_accum=args.slice_retain_grad_accum,
