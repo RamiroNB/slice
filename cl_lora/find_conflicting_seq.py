@@ -22,6 +22,19 @@ Two CLI modes:
 """
 from __future__ import annotations
 
+import warnings
+
+# Suppress the "found in sys.modules after import of package" warning that
+# runpy emits when `python -m cl_lora.find_conflicting_seq` is used and
+# __init__.py has already imported this module. Must be at module level so
+# it fires before runpy checks sys.modules.
+warnings.filterwarnings(
+    "ignore",
+    message=".*found in sys.modules after import of package.*",
+    category=RuntimeWarning,
+    module="runpy",
+)
+
 import argparse
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Tuple
@@ -143,6 +156,157 @@ DEFAULT_SEARCH_POOL: List[SuperNITask] = [
 # Gradient conflict measurement
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Disk-cache helpers — store one task's gradient as fp16 on disk so we never
+# need to hold more than one (or two, during scoring) gradient dicts in VRAM.
+# ---------------------------------------------------------------------------
+
+def _cache_path(cache_dir: str, task_name: str) -> str:
+    import os
+    safe = task_name.replace("/", "_").replace(" ", "_")
+    return os.path.join(cache_dir, f"grad_{safe}.pt")
+
+
+def _save_grad_cache(task_name: str, grads: Dict[str, Any], cache_dir: str) -> None:
+    """Save gradient dict to disk in fp16 (halves disk/read cost vs fp32)."""
+    import os
+    import torch
+    os.makedirs(cache_dir, exist_ok=True)
+    path = _cache_path(cache_dir, task_name)
+    torch.save({k: v.half().cpu() for k, v in grads.items()}, path)
+    logger.info("  cached → %s", path)
+
+
+def _load_grad_cache(task_name: str, cache_dir: str) -> Dict[str, Any]:
+    """Load a cached gradient dict back onto GPU as fp16."""
+    import torch
+    path = _cache_path(cache_dir, task_name)
+    return torch.load(path, map_location="cuda", weights_only=True)
+
+
+# ---------------------------------------------------------------------------
+# CountSketch compression — reduces each 5.6 GB gradient file to ~800 KB
+# while preserving dot products (and thus cosine similarity).
+#
+# How it works: each gradient element g[i] is mapped to a random bucket
+# b[i] in {0..k-1} with a random sign s[i] in {±1}. The sketch accumulates
+# sketch[b[i]] += s[i] * g[i]. Then E[dot(sketch_A, sketch_B)] = dot(g_A, g_B)
+# exactly (unbiased). Std of the estimator ≈ ||g_A|| ||g_B|| / sqrt(k).
+# With k=200k, error ≈ 0.2% — plenty for ranking 325 pairs.
+#
+# The bucket/sign assignments are seeded by module name so they are identical
+# across all tasks → dot products are correctly estimated pairwise.
+# ---------------------------------------------------------------------------
+
+_SKETCH_K = 200_000  # sketch dimension; 200k × 4 bytes = 800 KB per task
+
+
+def _sketch_path(sketch_dir: str, task_name: str) -> str:
+    import os
+    safe = task_name.replace("/", "_").replace(" ", "_")
+    return os.path.join(sketch_dir, f"sketch_{safe}.pt")
+
+
+def _module_seed(module_name: str, base_seed: int = 42) -> int:
+    """Deterministic seed from module name (stable across Python runs)."""
+    import hashlib
+    h = int(hashlib.sha256(module_name.encode()).hexdigest()[:16], 16)
+    return (base_seed ^ h) & 0x7FFFFFFF
+
+
+def _build_global_sketch(
+    grads: Dict[str, Any],
+    k: int = _SKETCH_K,
+    seed: int = 42,
+) -> Tuple[Any, float, Dict[str, float]]:
+    """CountSketch of the concatenated gradient across all modules.
+
+    Returns (sketch_cpu, global_norm, {module: norm}).
+    The sketch is fp32 on CPU (~800 KB for k=200k).
+    """
+    import torch
+    sketch = torch.zeros(k, device="cuda")
+    global_norm_sq = 0.0
+    module_norms: Dict[str, float] = {}
+
+    for name, g in grads.items():
+        g_flat = g.float().view(-1).cuda()
+        d_m = g_flat.numel()
+        ms = _module_seed(name, seed)
+
+        gen_idx = torch.Generator(device="cuda").manual_seed(ms)
+        gen_sgn = torch.Generator(device="cuda").manual_seed(ms ^ 0xDEADBEEF)
+        indices = torch.randint(0, k, (d_m,), generator=gen_idx, device="cuda")
+        signs = torch.randint(0, 2, (d_m,), generator=gen_sgn, device="cuda").float().mul_(2).sub_(1)
+
+        sketch.scatter_add_(0, indices, g_flat * signs)
+        nm = float(g_flat.norm().item())
+        module_norms[name] = nm
+        global_norm_sq += nm * nm
+        del g_flat, indices, signs
+        torch.cuda.empty_cache()
+
+    return sketch.cpu(), global_norm_sq ** 0.5, module_norms
+
+
+def _save_sketch_cache(task_name: str, sketch: Any, global_norm: float,
+                        module_norms: Dict[str, float], sketch_dir: str) -> None:
+    import os, torch
+    os.makedirs(sketch_dir, exist_ok=True)
+    torch.save({"sketch": sketch, "global_norm": global_norm,
+                "module_norms": module_norms}, _sketch_path(sketch_dir, task_name))
+
+
+def _load_sketch_cache(task_name: str, sketch_dir: str) -> Dict[str, Any]:
+    import torch
+    return torch.load(_sketch_path(sketch_dir, task_name), weights_only=True)
+
+
+def pair_conflict_from_sketch(
+    sa: Dict[str, Any],
+    sb: Dict[str, Any],
+) -> Dict[str, float]:
+    """Approximate global cosine from two CountSketches. Fast O(k) dot product."""
+    import torch
+    dot = float(torch.dot(sa["sketch"].float(), sb["sketch"].float()).item())
+    norm_a = sa["global_norm"]
+    norm_b = sb["global_norm"]
+    return {"global_cosine": dot / (norm_a * norm_b + 1e-12)}
+
+
+def compress_grad_cache(cache_dir: str, sketch_dir: str,
+                         k: int = _SKETCH_K, seed: int = 42) -> List[str]:
+    """Load each gradient file once, build a CountSketch, save to sketch_dir.
+
+    This is the one-time compression step. After it runs, pairwise scoring
+    reads 800 KB sketches instead of 5.6 GB gradient files → ~10000× less IO.
+    No gradient recomputation needed.
+    """
+    import glob, os, torch
+    from tqdm import tqdm
+
+    cache_files = sorted(glob.glob(os.path.join(cache_dir, "grad_*.pt")))
+    logger.info(
+        "Compressing %d gradient files → CountSketches (k=%d, ~%.0f KB each)",
+        len(cache_files), k, k * 4 / 1024,
+    )
+    task_names = []
+    for path in tqdm(cache_files, desc="compressing gradients", unit="task"):
+        # Strip "grad_" prefix and ".pt" suffix to get task name.
+        task_name = os.path.basename(path)[len("grad_"):-len(".pt")]
+        task_names.append(task_name)
+        if os.path.exists(_sketch_path(sketch_dir, task_name)):
+            logger.info("  [already compressed] %s", task_name)
+            continue
+        grads = torch.load(path, map_location="cuda", weights_only=True)
+        sketch, global_norm, module_norms = _build_global_sketch(grads, k=k, seed=seed)
+        del grads
+        torch.cuda.empty_cache()
+        _save_sketch_cache(task_name, sketch, global_norm, module_norms, sketch_dir)
+        logger.info("  compressed → %s", _sketch_path(sketch_dir, task_name))
+    return task_names
+
+
 def _normalize_target_modules(target_modules: Any) -> List[str]:
     """Narrow peft.LoraConfig.target_modules (list[str] | str | None) to list[str]."""
     if target_modules is None:
@@ -165,11 +329,13 @@ def compute_task_gradient(
     seed: int = 42,
 ) -> Dict[str, torch.Tensor]:
     """Average per-step gradient on one task's training data, base model only."""
+    import torch
+    from torch.utils.data import DataLoader
+    from transformers import DataCollatorForLanguageModeling
     from .lora_config import build_lora_config
     from .load_dataset import load_training_dataset
     from .slice.gradients import accumulate_gradients
     from .slice.utils import (
-        build_dataloader,
         model_device,
         target_weight_params,
         tokenize_dataset,
@@ -180,7 +346,20 @@ def compute_task_gradient(
     target_params = target_weight_params(model, target_modules)
     ds, _ = load_training_dataset(task=task, eval_size=1, seed=seed)
     ds = tokenize_dataset(ds, tokenizer=tokenizer, max_length=max_seq_length)
-    loader = build_dataloader(ds, tokenizer=tokenizer, batch_size=batch_size, seed=seed)
+    # num_workers=0: no subprocess spawning — avoids dill/tempfile crash when
+    # /tmp is absent on the server. Single-process dataloading is fine here
+    # since the bottleneck is the backward pass, not data I/O.
+    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collator,
+        generator=generator,
+        num_workers=0,
+    )
     grads, steps = accumulate_gradients(
         model=model,
         dataloader=loader,
@@ -189,9 +368,7 @@ def compute_task_gradient(
         max_steps=max_steps,
     )
     denom = max(1, steps)
-    # Move to CPU so we can hold gradients for multiple tasks at once without
-    # blowing up VRAM when iterating a task pool.
-    return {k: (v / float(denom)).detach().to("cpu") for k, v in grads.items()}
+    return {k: (v / float(denom)).detach() for k, v in grads.items()}
 
 
 def pair_conflict(
@@ -373,44 +550,100 @@ def search_opposite_pairs(
     max_seq_length: int = 256,
     seed: int = 42,
     top_k: int = 10,
+    cache_dir: str | None = None,
 ) -> List[Tuple[str, str, Dict[str, float]]]:
     """Compute pairwise conflict across `tasks`, rank by most-opposite first.
 
+    When `cache_dir` is given, gradients are stored on disk as fp16 one task at
+    a time — the model is never in VRAM alongside more than one gradient dict.
+    This lets the full 26-task pool run on 48 GB VRAM that would otherwise OOM
+    if all gradients were kept in memory simultaneously.
+
     Returns all unordered pairs with their stats, sorted by global_cosine
-    ascending (most negative = most opposite first). Also prints a top-K
-    summary (most opposite AND most aligned, for contrast).
+    ascending (most negative = most opposite first).
     """
+    import os
+    import torch
     from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model
 
     model_name = model_name or MODEL_NAME
-    tokenizer = build_tokenizer(model_name=model_name, hf_token=HF_TOKEN)
-    model = load_base_model(model_name=model_name, hf_token=HF_TOKEN)
+
+    # Determine which tasks still need gradient computation.
+    def _needs_compute(task: Any) -> bool:
+        if cache_dir is None:
+            return True
+        name = getattr(task, "name", str(task))
+        return not os.path.exists(_cache_path(cache_dir, name))
+
+    tasks_to_compute = [t for t in tasks if _needs_compute(t)]
 
     logger.info(
-        "Search: n_tasks=%d  pairs=%d  max_steps=%d  batch_size=%d",
-        len(tasks), len(tasks) * (len(tasks) - 1) // 2, max_steps, batch_size,
+        "Search: n_tasks=%d  to_compute=%d  pairs=%d  max_steps=%d  batch_size=%d",
+        len(tasks),
+        len(tasks_to_compute),
+        len(tasks) * (len(tasks) - 1) // 2,
+        max_steps,
+        batch_size,
     )
 
-    task_grads: Dict[str, Dict[str, Any]] = {}
-    for task in tasks:
-        name = getattr(task, "name", str(task))
-        logger.info("  grad for task=%s", name)
-        try:
-            task_grads[name] = compute_task_gradient(
-                model, tokenizer, task,
-                max_steps=max_steps, batch_size=batch_size,
-                max_seq_length=max_seq_length, seed=seed,
-            )
-        except Exception as exc:  # noqa: BLE001 — we want to skip broken tasks
-            logger.warning("  SKIP %s (failed to load/compute): %s", name, exc)
+    # --- Phase 1: compute gradients ------------------------------------------
+    # Keep all in a dict (GPU) when no cache_dir, or stream to disk otherwise.
+    task_grads: Dict[str, Dict[str, Any]] = {}  # only populated when cache_dir is None
+    task_names: List[str] = []
 
-    names = list(task_grads)
+    if tasks_to_compute:
+        tokenizer = build_tokenizer(model_name=model_name, hf_token=HF_TOKEN)
+        model = load_base_model(model_name=model_name, hf_token=HF_TOKEN)
+
+        for task in tasks:
+            name = getattr(task, "name", str(task))
+            if cache_dir and os.path.exists(_cache_path(cache_dir, name)):
+                logger.info("  [cached] %s", name)
+                task_names.append(name)
+                continue
+            logger.info("  grad for task=%s", name)
+            try:
+                grads = compute_task_gradient(
+                    model, tokenizer, task,
+                    max_steps=max_steps, batch_size=batch_size,
+                    max_seq_length=max_seq_length, seed=seed,
+                )
+                if cache_dir:
+                    _save_grad_cache(name, grads, cache_dir)
+                    del grads
+                    torch.cuda.empty_cache()
+                else:
+                    task_grads[name] = grads
+                task_names.append(name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("  SKIP %s (failed to load/compute): %s", name, exc)
+
+        if cache_dir:
+            # Free the model before scoring so Phase 2 only holds 2 grad dicts.
+            del model, tokenizer
+            torch.cuda.empty_cache()
+            logger.info("Model freed. Starting pairwise scoring from cache.")
+    else:
+        # All already cached — no model needed at all.
+        task_names = [getattr(t, "name", str(t)) for t in tasks]
+
+    # --- Phase 2: pairwise scoring -------------------------------------------
+    from tqdm import tqdm
+    from itertools import combinations
+
     pairs: List[Tuple[str, str, Dict[str, float]]] = []
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            a, b = names[i], names[j]
+    pair_list = list(combinations(range(len(task_names)), 2))
+    for i, j in tqdm(pair_list, desc="scoring pairs", unit="pair"):
+        a, b = task_names[i], task_names[j]
+        if cache_dir:
+            ga = _load_grad_cache(a, cache_dir)
+            gb = _load_grad_cache(b, cache_dir)
+            s = pair_conflict(ga, gb)
+            del ga, gb
+            torch.cuda.empty_cache()
+        else:
             s = pair_conflict(task_grads[a], task_grads[b])
-            pairs.append((a, b, s))
+        pairs.append((a, b, s))
 
     pairs.sort(key=lambda x: x[2].get("global_cosine", 0.0))
 
@@ -450,6 +683,65 @@ def search_opposite_pairs(
     return pairs
 
 
+def find_best_sequences(
+    pairs: List[Tuple[str, str, Dict[str, float]]],
+    n: int = 5,
+    top_k: int = 5,
+    metric: str = "global_cosine",
+) -> List[Tuple[List[str], float]]:
+    """Brute-force search for the n-task subset with minimum mean pairwise cosine.
+
+    C(26, 5) = 65 780 combos × C(5,2) = 10 lookups each → ~660K ops, instant.
+    Returns top_k subsets ordered by ascending mean cosine (most opposite first).
+    """
+    from itertools import combinations
+
+    score_lookup: Dict[Tuple[str, str], float] = {}
+    all_names: set = set()
+    for a, b, s in pairs:
+        v = s.get(metric, 0.0)
+        score_lookup[(a, b)] = v
+        score_lookup[(b, a)] = v
+        all_names.add(a)
+        all_names.add(b)
+
+    names = sorted(all_names)
+    n_pairs_in_combo = n * (n - 1) // 2
+    best: List[Tuple[float, List[str]]] = []
+
+    for combo in combinations(names, n):
+        mean_cos = sum(
+            score_lookup.get((combo[i], combo[j]), 0.0)
+            for i in range(n)
+            for j in range(i + 1, n)
+        ) / n_pairs_in_combo
+
+        if len(best) < top_k or mean_cos < best[-1][0]:
+            best.append((mean_cos, list(combo)))
+            best.sort(key=lambda x: x[0])
+            if len(best) > top_k:
+                best.pop()
+
+    return [(task_list, score) for score, task_list in best]
+
+
+def _print_best_sequences(
+    results: List[Tuple[List[str], float]],
+    n: int,
+    metric: str = "global_cosine",
+) -> None:
+    print()
+    print("=" * 80)
+    print(f"Top-{len(results)} most-opposite {n}-task subsets  (metric: {metric})")
+    print("Lower = more opposite = SLICE projection fires more")
+    print("=" * 80)
+    for rank, (task_list, score) in enumerate(results, 1):
+        print(f"\n#{rank}  mean {metric} = {score:+.4f}")
+        for i, t in enumerate(task_list, 1):
+            print(f"    {i}. {t}")
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Measure gradient opposition across CL tasks."
@@ -462,6 +754,14 @@ def main() -> None:
     mode.add_argument(
         "--search", action="store_true",
         help="Search all unordered pairs in a task pool; rank by opposition.",
+    )
+    mode.add_argument(
+        "--compress", action="store_true",
+        help=(
+            "One-time step: read each gradient in --cache-dir once, build a "
+            "CountSketch (~800 KB), save to --sketch-dir. After this, --search "
+            "with --sketch-dir scores all pairs in seconds instead of hours."
+        ),
     )
     parser.add_argument(
         "--pool", default=None,
@@ -477,7 +777,30 @@ def main() -> None:
     parser.add_argument("--max-seq-length", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--cache-dir", default=None,
+        help="Directory for per-task gradient caches (fp16 .pt files).",
+    )
+    parser.add_argument(
+        "--sketch-dir", default=None,
+        help=(
+            "Directory for CountSketch summaries (~800 KB per task). "
+            "When provided for --search, scores all pairs from sketches "
+            "(seconds) instead of loading full 5.6 GB gradient files (hours)."
+        ),
+    )
+    parser.add_argument(
+        "--find-sequence", type=int, default=None, metavar="N",
+        help=(
+            "After pair search, brute-force all C(tasks, N) subsets and print "
+            "the top-k with the lowest mean pairwise cosine (most SLICE-friendly)."
+        ),
+    )
     args = parser.parse_args()
+
+    # Suppress library FutureWarnings we can't control.
+    warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+    warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 
     lvl = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.basicConfig(
@@ -488,17 +811,75 @@ def main() -> None:
     logging.getLogger("transformers").setLevel(logging.WARNING)
     logging.getLogger("peft").setLevel(logging.WARNING)
 
-    if args.search:
+    if args.compress:
+        if not args.cache_dir:
+            parser.error("--compress requires --cache-dir")
+        sketch_dir = args.sketch_dir or (args.cache_dir + "_sketches")
+        compress_grad_cache(args.cache_dir, sketch_dir, seed=args.seed)
+        print(f"\nSketches saved to: {sketch_dir}")
+        print("Now run --search --sketch-dir to score all pairs in seconds.")
+
+    elif args.search:
         pool = _resolve_task_pool(args.pool)
-        search_opposite_pairs(
-            pool,
-            model_name=args.model_name,
-            max_steps=args.max_steps,
-            batch_size=args.batch_size,
-            max_seq_length=args.max_seq_length,
-            seed=args.seed,
-            top_k=args.top_k,
-        )
+
+        if args.sketch_dir:
+            # Fast path: score all pairs from tiny sketch files.
+            import glob, os
+            from itertools import combinations
+            from tqdm import tqdm
+
+            sketch_files = sorted(glob.glob(os.path.join(args.sketch_dir, "sketch_*.pt")))
+            task_names = [
+                os.path.basename(p)[len("sketch_"):-len(".pt")]
+                for p in sketch_files
+            ]
+            logger.info("Scoring %d tasks (%d pairs) from sketches in %s",
+                        len(task_names), len(task_names) * (len(task_names) - 1) // 2,
+                        args.sketch_dir)
+
+            sketches = {n: _load_sketch_cache(n, args.sketch_dir) for n in task_names}
+            pair_list = list(combinations(range(len(task_names)), 2))
+            pairs = []
+            for i, j in tqdm(pair_list, desc="scoring pairs (sketch)", unit="pair"):
+                a, b = task_names[i], task_names[j]
+                s = pair_conflict_from_sketch(sketches[a], sketches[b])
+                pairs.append((a, b, s))
+
+            pairs.sort(key=lambda x: x[2].get("global_cosine", 0.0))
+
+            header = (f"{'task_a':34s} {'task_b':34s} {'glob_cos':>9s}")
+            row = "{:34s} {:34s} {:+9.4f}"
+            print()
+            print("=" * 80)
+            print(f"Pair search (sketch) — {len(task_names)} tasks, {len(pairs)} pairs")
+            print("=" * 80)
+            print("\n[MOST OPPOSITE — SLICE projection fires here]")
+            print(header)
+            print("-" * 80)
+            for a, b, s in pairs[:args.top_k]:
+                print(row.format(a[:34], b[:34], s["global_cosine"]))
+            print("\n[MOST ALIGNED — SLICE does nothing here]")
+            print(header)
+            print("-" * 80)
+            for a, b, s in pairs[-args.top_k:][::-1]:
+                print(row.format(a[:34], b[:34], s["global_cosine"]))
+            print()
+        else:
+            pairs = search_opposite_pairs(
+                pool,
+                model_name=args.model_name,
+                max_steps=args.max_steps,
+                batch_size=args.batch_size,
+                max_seq_length=args.max_seq_length,
+                seed=args.seed,
+                top_k=args.top_k,
+                cache_dir=args.cache_dir,
+            )
+
+        if args.find_sequence is not None:
+            results = find_best_sequences(pairs, n=args.find_sequence, top_k=args.top_k)
+            _print_best_sequences(results, n=args.find_sequence)
+
     else:
         seq = get_sequence(args.sequence)
         analyze_sequence(
@@ -521,6 +902,7 @@ __all__ = [
     "pair_conflict",
     "analyze_sequence",
     "search_opposite_pairs",
+    "find_best_sequences",
 ]
 
 
