@@ -47,19 +47,23 @@ from .task_sequences import (
     Sequence,
     SuperNITask,
     get_sequence,
-    # classification tasks
-    NI195,
-    NI363,
-    NI1292,
-    NI1310,
-    NI1343,
-    # generation tasks
-    NI024,
-    NI511,
-    NI589,
-    NI618,
-    NI1290,
-    NI1357,
+    # original 26 tasks
+    NI195, NI363, NI1292, NI1310, NI1343,
+    NI024, NI511, NI589, NI618, NI1290, NI1357,
+    # diverse extension pool
+    NI077, NI079,                              # code / SQL
+    NI085, NI086, NI087, NI088, NI090,        # math / program execution
+    NI092, NI161, NI205, NI206, NI208,
+    NI243, NI376, NI1332,
+    NI119,                                     # geometry
+    NI179, NI180, NI181,                       # clinical NER (PICO)
+    NI828,                                     # causal reasoning (COPA)
+    NI271, NI425,                              # non-English translation
+    NI286, NI325, NI327,                       # toxicity / safety
+    NI1346,                                    # grammar
+    NI1152, NI1429, NI1582,                    # word-level semantics
+    NI199, NI209, NI513, NI517,                # entailment / stance / emotion
+    NI183, NI1711,                             # creative / phonetic
 )
 
 logger = logging.getLogger("cl_lora.find_conflicting_seq")
@@ -149,6 +153,60 @@ DEFAULT_SEARCH_POOL: List[SuperNITask] = [
     NI589,   # Amazon food review - summary generation
     NI1290,  # XSum - summary generation
     NI024,   # CosmosQA - QA generation
+]
+
+# Extended pool targeting output spaces not covered by the original 26 tasks
+# (code, math, non-English, toxicity, grammar, word-level, stance, creative).
+# Use --pool diverse to search these for genuine gradient opposition (cos < 0).
+DIVERSE_SEARCH_POOL: List[SuperNITask] = [
+    # --- original 26 (all) ---
+    NI195, NI363, NI1292, NI1310, NI1343,
+    NI024, NI511, NI589, NI618, NI1290, NI1357,
+    # --- code / SQL ---
+    NI077,   # Splash (NL→SQL)
+    NI079,   # CoNaLa (NL→Python)
+    # --- math / arithmetic / program execution ---
+    NI085,   # Unnatural AddSub arithmetic
+    NI086,   # Italian-symbol arithmetic
+    NI087,   # Custom-operator arithmetic
+    NI090,   # Equation learner algebra
+    NI092,   # Prime classification
+    NI119,   # Geometry multiple-choice (SemEval)
+    NI161,   # Count words containing letter
+    NI205,   # Remove even elements from list
+    NI206,   # Collatz conjecture step
+    NI208,   # Combinations of list
+    NI243,   # Count set intersection elements
+    NI376,   # Reverse order of words
+    NI1332,  # Leap year check
+    # --- clinical / biomedical NER ---
+    NI179,   # PICO participant extraction
+    NI180,   # PICO intervention extraction
+    NI181,   # PICO outcome extraction
+    # --- causal reasoning ---
+    NI828,   # COPA cause/effect classification
+    # --- non-English translation ---
+    NI271,   # Europarl BG→EN
+    NI425,   # EN→Hindi (Devanagari output)
+    # --- toxicity / safety ---
+    NI286,   # OLID offense judgment
+    NI325,   # Jigsaw identity attack
+    NI327,   # Jigsaw toxic classification
+    # --- grammar / spelling ---
+    NI088,   # Typo identification
+    NI1346,  # CoLA grammaticality
+    # --- word-level semantics ---
+    NI1152,  # BARD analogical reasoning
+    NI1429,  # Evalution semantic relation classification
+    NI1582,  # BLESS hypernym generation
+    # --- entailment / stance / emotion ---
+    NI199,   # MNLI 3-way entailment
+    NI209,   # Debatepedia stance detection
+    NI513,   # Argument stance classification
+    NI517,   # EMO dialogue emotion
+    # --- creative / phonetic ---
+    NI183,   # Rhyme generation
+    NI1711,  # POKI poem generation
 ]
 
 
@@ -523,15 +581,21 @@ def _all_superni_tasks_safe() -> List[SuperNITask]:
 def _resolve_task_pool(pool_arg: str | None) -> List[SuperNITask]:
     """Parse --pool arg into a list of SuperNITask objects.
 
-    Accepts comma-separated NI-IDs ("NI195,NI363") or "all" (the full
-    registered SuperNI catalogue) or None (the curated DEFAULT_SEARCH_POOL).
+    Accepts:
+      None              → DEFAULT_SEARCH_POOL (7 curated tasks)
+      "all"             → all registered SuperNI tasks (26)
+      "diverse"         → DIVERSE_SEARCH_POOL (51 tasks, diverse output spaces)
+      "NI195,NI363,..." → explicit comma-separated NI-IDs
     """
     if pool_arg is None:
         return list(DEFAULT_SEARCH_POOL)
-    if pool_arg.strip().lower() == "all":
+    key = pool_arg.strip().lower()
+    if key == "all":
         return _all_superni_tasks_safe()
+    if key == "diverse":
+        return list(DIVERSE_SEARCH_POOL)
     wanted = {tok.strip() for tok in pool_arg.split(",") if tok.strip()}
-    by_id = {t.ni_id: t for t in _all_superni_tasks_safe()}
+    by_id = {t.ni_id: t for t in DIVERSE_SEARCH_POOL}
     missing = wanted - set(by_id)
     if missing:
         raise ValueError(
@@ -649,7 +713,7 @@ def search_opposite_pairs(
 
     print()
     print("=" * 96)
-    print(f"Pair search — {len(names)} tasks, {len(pairs)} unordered pairs")
+    print(f"Pair search — {len(task_names)} tasks, {len(pairs)} unordered pairs")
     print(f"base model: {model_name}  (gradients on untrained base)")
     print("=" * 96)
     header = (
@@ -847,23 +911,24 @@ def main() -> None:
 
             pairs.sort(key=lambda x: x[2].get("global_cosine", 0.0))
 
-            header = (f"{'task_a':34s} {'task_b':34s} {'glob_cos':>9s}")
-            row = "{:34s} {:34s} {:+9.4f}"
-            print()
-            print("=" * 80)
-            print(f"Pair search (sketch) — {len(task_names)} tasks, {len(pairs)} pairs")
-            print("=" * 80)
-            print("\n[MOST OPPOSITE — SLICE projection fires here]")
-            print(header)
-            print("-" * 80)
-            for a, b, s in pairs[:args.top_k]:
-                print(row.format(a[:34], b[:34], s["global_cosine"]))
-            print("\n[MOST ALIGNED — SLICE does nothing here]")
-            print(header)
-            print("-" * 80)
-            for a, b, s in pairs[-args.top_k:][::-1]:
-                print(row.format(a[:34], b[:34], s["global_cosine"]))
-            print()
+            if args.find_sequence is None:
+                header = (f"{'task_a':34s} {'task_b':34s} {'glob_cos':>9s}")
+                row = "{:34s} {:34s} {:+9.4f}"
+                print()
+                print("=" * 80)
+                print(f"Pair search (sketch) — {len(task_names)} tasks, {len(pairs)} pairs")
+                print("=" * 80)
+                print("\n[MOST OPPOSITE — SLICE projection fires here]")
+                print(header)
+                print("-" * 80)
+                for a, b, s in pairs[:args.top_k]:
+                    print(row.format(a[:34], b[:34], s["global_cosine"]))
+                print("\n[MOST ALIGNED — SLICE does nothing here]")
+                print(header)
+                print("-" * 80)
+                for a, b, s in pairs[-args.top_k:][::-1]:
+                    print(row.format(a[:34], b[:34], s["global_cosine"]))
+                print()
         else:
             pairs = search_opposite_pairs(
                 pool,
@@ -898,6 +963,7 @@ __all__ = [
     "NI_SEQ_CONTROL_RATING",
     "NI_SEQ_CONTROL_SUMM",
     "DEFAULT_SEARCH_POOL",
+    "DIVERSE_SEARCH_POOL",
     "compute_task_gradient",
     "pair_conflict",
     "analyze_sequence",

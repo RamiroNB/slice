@@ -345,6 +345,84 @@ NI079 = SuperNITask(
     hf_config="task079_conala_concat_strings",
 )
 
+# --- More math / symbol arithmetic ---
+NI086 = SuperNITask(
+    ni_id="NI086",
+    name="task086_translated_symbol_arithmetic",
+    source="Translated Symbol Arithmetic",
+    category="generation",
+    hf_config="task086_translated_symbol_arithmetic",
+)
+NI087 = SuperNITask(
+    ni_id="NI087",
+    name="task087_new_operator_addsub_arithmetic",
+    source="New Operator Arithmetic",
+    category="generation",
+    hf_config="task087_new_operator_addsub_arithmetic",
+)
+NI119 = SuperNITask(
+    ni_id="NI119",
+    name="task119_semeval_2019_task10_geometric_mathematical_answer_generation",
+    source="SemEval-2019 Task10 Geometry",
+    category="classification",
+    hf_config="task119_semeval_2019_task10_geometric_mathematical_answer_generation",
+)
+
+# --- Clinical / biomedical NER ---
+NI179 = SuperNITask(
+    ni_id="NI179",
+    name="task179_participant_extraction",
+    source="PICO Clinical NER",
+    category="generation",
+    hf_config="task179_participant_extraction",
+)
+NI180 = SuperNITask(
+    ni_id="NI180",
+    name="task180_intervention_extraction",
+    source="PICO Clinical NER",
+    category="generation",
+    hf_config="task180_intervention_extraction",
+)
+NI181 = SuperNITask(
+    ni_id="NI181",
+    name="task181_outcome_extraction",
+    source="PICO Clinical NER",
+    category="generation",
+    hf_config="task181_outcome_extraction",
+)
+
+# --- Algorithmic / combinatorics ---
+NI206 = SuperNITask(
+    ni_id="NI206",
+    name="task206_collatz_conjecture",
+    source="Collatz Conjecture",
+    category="generation",
+    hf_config="task206_collatz_conjecture",
+)
+NI208 = SuperNITask(
+    ni_id="NI208",
+    name="task208_combinations_of_list",
+    source="Combinations of List",
+    category="generation",
+    hf_config="task208_combinations_of_list",
+)
+NI243 = SuperNITask(
+    ni_id="NI243",
+    name="task243_count_elements_in_set_intersection",
+    source="Set Intersection Counting",
+    category="generation",
+    hf_config="task243_count_elements_in_set_intersection",
+)
+
+# --- Causal reasoning ---
+NI828 = SuperNITask(
+    ni_id="NI828",
+    name="task828_copa_commonsense_cause_effect",
+    source="COPA",
+    category="classification",
+    hf_config="task828_copa_commonsense_cause_effect",
+)
+
 # --- Math / arithmetic / program execution ---
 NI085 = SuperNITask(
     ni_id="NI085",
@@ -637,6 +715,51 @@ SEQUENCES = {
         description=(
             "Most-opposite 5-task subset from 51-task diverse pool (mean global_cosine=+0.2354): "
             "TypoCheck → Algebra → Evalution → SST2 → Mutual"
+        ),
+    ),
+    "NI-Seq-Opposite-v3": Sequence(
+        name="NI-Seq-Opposite-v3",
+        task_type="mixed",
+        tasks=[NI088, NI1510, NI181, NI243, NI363],
+        description=(
+            "Rank-1 most-opposite from 61-task pool (mean global_cosine=+0.2141): "
+            "TypoCheck → Evalution → OutcomeNER → SetIntersection → SST2"
+        ),
+    ),
+    "NI-Seq-Opposite-v4": Sequence(
+        name="NI-Seq-Opposite-v4",
+        task_type="mixed",
+        tasks=[NI088, NI1510, NI243, NI363, NI611],
+        description=(
+            "Rank-2 most-opposite from 61-task pool (mean global_cosine=+0.2216): "
+            "TypoCheck → Evalution → SetIntersection → SST2 → Mutual"
+        ),
+    ),
+    "NI-Seq-Opposite-v5": Sequence(
+        name="NI-Seq-Opposite-v5",
+        task_type="mixed",
+        tasks=[NI088, NI141, NI181, NI243, NI363],
+        description=(
+            "Rank-3 most-opposite from 61-task pool (mean global_cosine=+0.2223): "
+            "TypoCheck → OddManOut → OutcomeNER → SetIntersection → SST2"
+        ),
+    ),
+    "NI-Seq-Opposite-v6": Sequence(
+        name="NI-Seq-Opposite-v6",
+        task_type="mixed",
+        tasks=[NI088, NI1429, NI181, NI243, NI363],
+        description=(
+            "Rank-4 most-opposite from 61-task pool (mean global_cosine=+0.2229): "
+            "TypoCheck → SemanticRelation → OutcomeNER → SetIntersection → SST2"
+        ),
+    ),
+    "NI-Seq-Opposite-v7": Sequence(
+        name="NI-Seq-Opposite-v7",
+        task_type="mixed",
+        tasks=[NI086, NI088, NI1510, NI181, NI243],
+        description=(
+            "Rank-5 most-opposite from 61-task pool (mean global_cosine=+0.2230): "
+            "ItalianArith → TypoCheck → Evalution → OutcomeNER → SetIntersection"
         ),
     ),
     "NI-Seq-Dummy": Sequence(
