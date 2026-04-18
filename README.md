@@ -80,12 +80,20 @@ Resume an interrupted run:
 	  --output-dir outputs/single_task_demo \
 	  --save-merged-model
 
-## Slice LoRA Initialization
+## LoRA Initialization Methods
 
-The slice initializer performs a backward pass over the current task data
-and all previously seen tasks (retain tasks) to seed LoRA A/B matrices.
+The `--slice-init` flag enables gradient-based initialization. Three methods are available:
+
+### Slice (default gradient-based)
+Performs backward passes over current task data and all previously seen tasks (retain tasks) to seed LoRA A/B matrices.
 At task t, the retain gradient is constructed using data from all tasks < t.
 Initializations are cached per task set and config.
+
+### LoRA-GA (gradient-aware baseline)
+Uses SVD on forget gradients only, ignoring retain tasks. Faster than Slice but may not handle competing task objectives.
+
+### LoRAM (DST-based baseline)
+Lightweight initialization without explicit gradient computation. Best for quick comparisons.
 
 ### Retain batch size modes
 
@@ -95,6 +103,7 @@ Initializations are cached per task set and config.
   - `all_tasks` (default): All retain task datasets are concatenated into one dataloader with total batch size = `--slice-retain-batch-size`.
   - `each_task`: A separate dataloader is built per retain task, each with batch size = `--slice-retain-batch-size`. Effective total batch size = `batch_size * n_retain_tasks`.
 - `--slice-single-retain-task-mode`: Only use the most recent previous task (t−1) for retain gradients, with the same batch size and steps as forget. Useful for ablation against the full multi-task retain.
+- `--slice-grad-project-always`: OGD-style projection. When enabled with `--slice-grad-project`, the retain-direction component is always removed (no ReLU/max conflict gate).
 
 Example (continual run with slice-no-proj init enabled):
 
@@ -190,19 +199,43 @@ Computed in cl_lora/metrics.py:
 - GP: Mean 0-shot general benchmark score.
 - IP: Mean few-shot in-context benchmark score.
 
+## Running Baseline Comparisons
+
+Use the provided evaluation scripts to run and compare baseline initialization methods:
+
+```bash
+# Run LoRA-GA, Slice, and LoRAM baselines on specified sequences
+bash scripts/full_eval_baselines.sh
+
+# Run both vanilla (no init) and Slice methods
+bash scripts/full_eval_both.sh
+
+# Customize with environment variables:
+GPU=0 RANK=64 RUN_SUFFIX=exp01 bash scripts/full_eval_baselines.sh
+```
+
+Specify initialization method via command line:
+```bash
+--slice-init-method lora_ga    # Use LoRA-GA initialization
+--slice-init-method slice      # Use Slice initialization (default)
+--slice-init-method loram      # Use LoRAM initialization
+```
+
+Control baseline behavior with environment variables:
+- `SLICE_GRAD_PROJECT_ALWAYS`: Enable OGD-style projection (always remove retain direction) when using Slice method.
+- `SLICE_GRAD_PROJECTION_MODE`: Projection granularity (`global` or `per_module`).
+- `SLICE_MAX_STEPS`: Gradient accumulation steps for initialization.
+
 ## Available Sequences
 
 Defined in cl_lora/task_sequences.py:
 
-- NI-Seq-C1
-- NI-Seq-C2
-- NI-Seq-G1
-- NI-Seq-G2
-- NI-Seq-M1
-- NI-Seq-M2
-- NI-Seq-Dummy
-- TRACE-Dummy
-- TRACE
+**Benign sequences:**
+- NI-Seq-C1, NI-Seq-C2, NI-Seq-G1, NI-Seq-G2, NI-Seq-M1, NI-Seq-M2
+- TRACE, TRACE-Dummy, NI-Seq-Dummy
+
+**Competing/catastrophic sequences** (opposite task pairs for testing method robustness):
+- NI-Seq-Opposite-v1 through NI-Seq-Opposite-v7
 
 
 ## Quick Eval

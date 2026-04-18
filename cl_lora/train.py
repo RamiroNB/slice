@@ -31,7 +31,7 @@ except ImportError:
     from load_dataset import load_training_dataset
     from lora_config import build_lora_config
     from repro import set_global_seed
-    from slice import SliceInitConfig, initialize_lora_with_slice
+    from slice import SliceInitConfig, initialize_lora_with_slice  # type: ignore[no-redef]
 
 
 def _patch_accelerate_unwrap_model_compat() -> None:
@@ -122,12 +122,14 @@ def train_on_task(
     slice_retain_scale: float = 1.0,
     slice_grad_project: bool = False,
     slice_grad_projection_mode: str = "per_module",
+    slice_grad_project_always: bool = False,
     slice_add_retain_grad: bool = False,
     slice_cache_context: str | None = None,
     slice_retain_batch_size: int | None = None,
     slice_retain_grad_accum: int | None = None,
     slice_retain_batch_size_set: str = "all_tasks",
     slice_single_retain_task_mode: bool = False,
+    slice_init_method: str = "slice",
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train a fresh LoRA adapter on one task, then merge it into the model.
 
@@ -157,6 +159,7 @@ def train_on_task(
             retain_scale=slice_retain_scale,
             grad_project=slice_grad_project,
             grad_projection_mode=slice_grad_projection_mode,
+            grad_project_always=slice_grad_project_always,
             add_retain_grad=slice_add_retain_grad,
             rank=rank,
             max_seq_length=max_seq_length,
@@ -164,6 +167,7 @@ def train_on_task(
             retain_grad_accum=slice_retain_grad_accum,
             retain_batch_size_set=slice_retain_batch_size_set,
             single_retain_task_mode=slice_single_retain_task_mode,
+            init_method=slice_init_method,
         )
         # propagate PEFT lora settings into slice config when available
         try:
@@ -314,6 +318,11 @@ def main() -> None:
         help="Projection mode when --slice-grad-project is enabled.",
     )
     parser.add_argument(
+        "--slice-grad-project-always",
+        action="store_true",
+        help="Use OGD-style projection: always remove retain-gradient component (no conflict gating).",
+    )
+    parser.add_argument(
         "--slice-add-retain-grad",
         action="store_true",
         help="Add retain gradient after projection when --slice-grad-project is enabled.",
@@ -327,6 +336,10 @@ def main() -> None:
         help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
     parser.add_argument("--slice-single-retain-task-mode", action="store_true",
         help="Only use the most recent previous task for retain, with same batch size as forget.")
+    parser.add_argument("--slice-init-method", choices=["slice", "lora_ga", "loram"],
+        default="slice",
+        help="Initialization method: 'slice' (default), 'lora_ga' (SVD on forget gradients only), "
+             "or 'loram' (DST-based, no gradients).")
     args = parser.parse_args()
 
     set_global_seed(args.seed)
@@ -349,11 +362,13 @@ def main() -> None:
         slice_retain_scale=args.slice_retain_scale,
         slice_grad_project=args.slice_grad_project,
         slice_grad_projection_mode=args.slice_grad_projection_mode,
+        slice_grad_project_always=args.slice_grad_project_always,
         slice_add_retain_grad=args.slice_add_retain_grad,
         slice_retain_batch_size=args.slice_retain_batch_size,
         slice_retain_grad_accum=args.slice_retain_grad_accum,
         slice_retain_batch_size_set=args.slice_retain_batch_size_set,
         slice_single_retain_task_mode=args.slice_single_retain_task_mode,
+        slice_init_method=args.slice_init_method,
     )
 
     if args.save_merged_model:
