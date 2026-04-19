@@ -154,6 +154,17 @@ def run_sequence(
     slice_retain_batch_size_set: str = "all_tasks",
     slice_single_retain_task_mode: bool = False,
     slice_init_method: str = "slice",
+    slice_projection_method: str = "pcgrad",
+    slice_cosine_threshold: float | None = None,
+    slice_per_layer_threshold: bool = False,
+    slice_per_layer_threshold_delta: float = 0.0,
+    slice_cagrad_c: float = 0.5,
+    slice_gradvac_phi: float = 0.0,
+    slice_gradvac_beta: float = 0.5,
+    slice_magnitude_preserve: bool = False,
+    slice_nullspace_rank: int = 8,
+    slice_nullspace_sv_threshold: float = 0.0,
+    slice_svd_selection: str = "lora_ga",
     keep_all_checkpoints: bool = False,
     general_eval_strategy: str = "every_stage",
     seen_eval_strategy: str = "full_matrix",
@@ -312,6 +323,17 @@ def run_sequence(
             slice_retain_batch_size_set=slice_retain_batch_size_set,
             slice_single_retain_task_mode=slice_single_retain_task_mode,
             slice_init_method=slice_init_method,
+            slice_projection_method=slice_projection_method,
+            slice_cosine_threshold=slice_cosine_threshold,
+            slice_per_layer_threshold=slice_per_layer_threshold,
+            slice_per_layer_threshold_delta=slice_per_layer_threshold_delta,
+            slice_cagrad_c=slice_cagrad_c,
+            slice_gradvac_phi=slice_gradvac_phi,
+            slice_gradvac_beta=slice_gradvac_beta,
+            slice_magnitude_preserve=slice_magnitude_preserve,
+            slice_nullspace_rank=slice_nullspace_rank,
+            slice_nullspace_sv_threshold=slice_nullspace_sv_threshold,
+            slice_svd_selection=slice_svd_selection,
         )
 
         seen_tasks.append(task)
@@ -516,6 +538,32 @@ def main() -> None:
         help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
     parser.add_argument("--slice-single-retain-task-mode", action="store_true",
         help="Only use the most recent previous task for retain, with same batch size as forget.")
+    parser.add_argument("--slice-projection-method",
+        choices=["pcgrad", "cagrad", "gradvac", "nullspace", "magnitude_preserving"],
+        default="pcgrad",
+        help="Advanced projection method. 'pcgrad' preserves existing behavior.")
+    parser.add_argument("--slice-cosine-threshold", type=float, default=None,
+        help="Cosine threshold tau. Projection fires when cos(g_f,g_r) < tau. "
+             "If unset, falls back to dot-sign gating.")
+    parser.add_argument("--slice-per-layer-threshold", action="store_true",
+        help="Use a per-module threshold computed as median(cos) - delta.")
+    parser.add_argument("--slice-per-layer-threshold-delta", type=float, default=0.0)
+    parser.add_argument("--slice-cagrad-c", type=float, default=0.5,
+        help="CAGrad interpolation strength in [0,1].")
+    parser.add_argument("--slice-gradvac-phi", type=float, default=0.0,
+        help="GradVac target cosine (initial).")
+    parser.add_argument("--slice-gradvac-beta", type=float, default=0.5,
+        help="GradVac EMA beta for target cosine.")
+    parser.add_argument("--slice-magnitude-preserve", action="store_true",
+        help="Rescale projected gradient back to original norm (idea A.6).")
+    parser.add_argument("--slice-nullspace-rank", type=int, default=8,
+        help="Rank for null-space projection.")
+    parser.add_argument("--slice-nullspace-sv-threshold", type=float, default=0.0,
+        help="Relative singular-value cutoff for null-space projection.")
+    parser.add_argument("--slice-svd-selection",
+        choices=["lora_ga", "top_r_no_sigma"], default="lora_ga",
+        help="SVD selection rule for LoRA A/B. 'top_r_no_sigma' uses the "
+             "top-r singular vectors without sigma weighting (idea C.16 variant).")
     parser.add_argument("--slice-init-method", choices=["slice", "lora_ga", "loram"],
         default="slice",
         help="Initialization method: 'slice' (default), 'lora_ga' (SVD on forget gradients only), "
@@ -611,6 +659,17 @@ def main() -> None:
         slice_retain_batch_size_set=args.slice_retain_batch_size_set,
         slice_single_retain_task_mode=args.slice_single_retain_task_mode,
         slice_init_method=args.slice_init_method,
+        slice_projection_method=args.slice_projection_method,
+        slice_cosine_threshold=args.slice_cosine_threshold,
+        slice_per_layer_threshold=args.slice_per_layer_threshold,
+        slice_per_layer_threshold_delta=args.slice_per_layer_threshold_delta,
+        slice_cagrad_c=args.slice_cagrad_c,
+        slice_gradvac_phi=args.slice_gradvac_phi,
+        slice_gradvac_beta=args.slice_gradvac_beta,
+        slice_magnitude_preserve=args.slice_magnitude_preserve,
+        slice_nullspace_rank=args.slice_nullspace_rank,
+        slice_nullspace_sv_threshold=args.slice_nullspace_sv_threshold,
+        slice_svd_selection=args.slice_svd_selection,
         keep_all_checkpoints=args.keep_all_checkpoints,
         general_eval_strategy=args.general_eval_strategy,
         seen_eval_strategy=args.seen_eval_strategy,
