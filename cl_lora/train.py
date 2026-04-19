@@ -58,7 +58,8 @@ HF_TOKEN = os.getenv("HUGGING_TOKEN")
 
 
 def build_tokenizer(model_name: str = MODEL_NAME, hf_token: str | None = HF_TOKEN):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    local = Path(model_name).is_dir()
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, local_files_only=local)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -71,10 +72,12 @@ def load_base_model(
     torch_dtype: torch.dtype = torch.bfloat16,
     device_map: str = "auto",
 ):
+    local = Path(model_name).is_dir()
     kwargs: dict = dict(
         torch_dtype=torch_dtype,
         device_map=device_map,
         token=hf_token,
+        local_files_only=local,
     )
     try:
         import flash_attn  # noqa: F401

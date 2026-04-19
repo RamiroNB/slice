@@ -116,9 +116,25 @@ def run_eval_from_manifest(
     stage: int = int(manifest.get("stage", 0))
     trained_task: str = manifest.get("trained_task", "")
 
-    print(f"Loading model from: {resolved_model_path}")
-    tokenizer = build_tokenizer(model_name=resolved_model_path, hf_token=HF_TOKEN)
-    model = load_base_model(model_name=resolved_model_path, hf_token=HF_TOKEN)
+    # Resolve the model path to absolute. If the manifest path doesn't exist
+    # (e.g. this is a different machine than where training ran), fall back to
+    # deriving it from the stage_dir: the checkpoint directory mirrors the
+    # stage directory structure under ../checkpoints/<stage_name>/merged_model.
+    abs_model_path = str(Path(resolved_model_path).resolve())
+    if not Path(abs_model_path).is_dir():
+        derived = stage_dir.parent.parent / "checkpoints" / stage_dir.name / "merged_model"
+        if derived.is_dir():
+            abs_model_path = str(derived.resolve())
+            print(f"Manifest model path not found; using derived path: {abs_model_path}")
+        else:
+            raise FileNotFoundError(
+                f"Model checkpoint not found at '{abs_model_path}' "
+                f"or derived path '{derived}'. "
+                f"Ensure the checkpoints/ directory was transferred to this machine."
+            )
+    print(f"Loading model from: {abs_model_path}")
+    tokenizer = build_tokenizer(model_name=abs_model_path, hf_token=HF_TOKEN)
+    model = load_base_model(model_name=abs_model_path, hf_token=HF_TOKEN)
 
     print(f"Resolving {len(resolved_eval_seen_names)} eval tasks from sequence '{resolved_sequence}'")
     eval_seen = _resolve_tasks(resolved_sequence, resolved_eval_seen_names)

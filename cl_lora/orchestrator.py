@@ -161,6 +161,8 @@ def run_sequence(
     orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
+    run_output_dir = run_output_dir.resolve()
+    train_output_dir = train_output_dir.resolve()
     run_output_dir.mkdir(parents=True, exist_ok=True)
     sequence = get_sequence(sequence_name)
     task_order = [task.name for task in sequence.tasks]
@@ -347,7 +349,7 @@ def run_sequence(
                 "sequence": sequence_name,
                 "seen_tasks": [getattr(t, "name", str(t)) for t in seen_tasks],
                 "eval_seen_tasks": [getattr(t, "name", str(t)) for t in eval_seen],
-                "model_path": str(checkpoint_dir),
+                "model_path": str(checkpoint_dir.resolve()),
                 "general_eval_keys": general_eval_keys,
                 "skip_general_eval": bool(skip_general),
                 "quick_eval": bool(quick_eval),
