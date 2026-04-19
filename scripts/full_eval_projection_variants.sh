@@ -27,7 +27,8 @@ TASK_EVAL_MAX_NEW_TOKENS="${TASK_EVAL_MAX_NEW_TOKENS:-32}"
 GENERAL_EVAL_BATCH_SIZE="${GENERAL_EVAL_BATCH_SIZE:-8}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-SEQUENCES=("${SEQUENCES[@]:-NI-Seq-G2 TRACE NI-Seq-G1}")
+SEQUENCES=("${SEQUENCES[@]:-NI-Seq-Opposite-v3 NI-Seq-Opposite-v2 NI-Seq-Opposite-v4 NI-Seq-G2 TRACE }")
+# SEQUENCES=("${SEQUENCES[@]:-NI-Seq-G2 TRACE NI-Seq-G1}")
 
 # Keep the VARIANT tag list in sync with full_train_projection_variants.sh.
 VARIANT_TAGS=(

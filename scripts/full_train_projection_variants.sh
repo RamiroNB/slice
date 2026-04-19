@@ -21,12 +21,13 @@ SLICE_RUN_PREFIX="${SLICE_RUN_PREFIX:-slice_var}"
 RUN_SUFFIX="${RUN_SUFFIX:-projvariants}"
 
 SLICE_CACHE_DIR="${SLICE_CACHE_DIR:-slice_cache}"
-SLICE_MAX_STEPS="${SLICE_MAX_STEPS:-64}"
+SLICE_MAX_STEPS="${SLICE_MAX_STEPS:-8}"
 SLICE_GRAD_PROJECTION_MODE="${SLICE_GRAD_PROJECTION_MODE:-global}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 # Sequences to sweep over.
-SEQUENCES=("${SEQUENCES[@]:-NI-Seq-G2 TRACE NI-Seq-G1}")
+SEQUENCES=("${SEQUENCES[@]:-NI-Seq-Opposite-v3 NI-Seq-Opposite-v2 NI-Seq-Opposite-v4 NI-Seq-G2 TRACE }")
+# SEQUENCES=("${SEQUENCES[@]:-NI-Seq-G2 TRACE NI-Seq-G1}")
 
 EXTRA_ARGS=("$@")
 
@@ -79,6 +80,9 @@ run_slice_variant() {
 
 VARIANTS=(
 	# tag|flags
+	"magpreserve|--slice-projection-method magnitude_preserving"
+	"svd_topr_no_sigma|--slice-svd-selection top_r_no_sigma"
+	"combo_cagrad_mag_topr|--slice-projection-method cagrad --slice-cagrad-c 0.5 --slice-magnitude-preserve --slice-svd-selection top_r_no_sigma"
 	"cagrad_c025|--slice-projection-method cagrad --slice-cagrad-c 0.25"
 	"cagrad_c050|--slice-projection-method cagrad --slice-cagrad-c 0.50"
 	"cagrad_c075|--slice-projection-method cagrad --slice-cagrad-c 0.75"
@@ -91,9 +95,6 @@ VARIANTS=(
 	"perlayer_d005|--slice-per-layer-threshold --slice-per-layer-threshold-delta 0.05"
 	"nullspace_r8|--slice-projection-method nullspace --slice-nullspace-rank 8"
 	"nullspace_r32|--slice-projection-method nullspace --slice-nullspace-rank 32"
-	"magpreserve|--slice-projection-method magnitude_preserving"
-	"svd_topr_no_sigma|--slice-svd-selection top_r_no_sigma"
-	"combo_cagrad_mag_topr|--slice-projection-method cagrad --slice-cagrad-c 0.5 --slice-magnitude-preserve --slice-svd-selection top_r_no_sigma"
 )
 
 for sequence_name in ${SEQUENCES[@]}; do

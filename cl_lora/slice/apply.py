@@ -12,7 +12,7 @@ def apply_slice_inits(
     peft_model: torch.nn.Module,
     inits: Dict[str, Dict[str, torch.Tensor]],
     *,
-    lora_alpha: float = 1.0,
+    lora_alpha: float = 2.0,
     r: Optional[int] = None,
     decomposition: Optional[str] = None,
 ) -> int:
