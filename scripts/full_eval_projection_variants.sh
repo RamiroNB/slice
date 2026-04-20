@@ -74,8 +74,30 @@ run_eval_for_run_dir() {
 			"${EXTRA_ARGS[@]}"
 }
 
+# Baseline run names produced by full_train_projection_variants.sh.
+# Each entry is a run-name prefix; the full name is "<prefix>_<seq_slug>_<RUN_SUFFIX>".
+BASELINE_PREFIXES=(
+	vanilla
+	loram
+	lora_ga_lora_ga
+	lora_ga_top_r_no_sigma
+)
+
 for sequence_name in ${SEQUENCES[@]}; do
 	seq_slug=$(echo "${sequence_name}" | tr '[:upper:]-' '[:lower:]_')
+
+	# Baselines
+	for prefix in "${BASELINE_PREFIXES[@]}"; do
+		run_name="${prefix}_${seq_slug}_${RUN_SUFFIX}"
+		run_dir="${RESULTS_ROOT}/${sequence_name}/${run_name}"
+		if [[ ! -d "${run_dir}" ]]; then
+			echo "[skip] missing run dir: ${run_dir}"
+			continue
+		fi
+		run_eval_for_run_dir "${run_dir}"
+	done
+
+	# Projection / SVD-selection variants
 	for tag in "${VARIANT_TAGS[@]}"; do
 		run_name="${SLICE_RUN_PREFIX}_${tag}_${seq_slug}_${RUN_SUFFIX}"
 		run_dir="${RESULTS_ROOT}/${sequence_name}/${run_name}"

@@ -68,6 +68,92 @@ run_slice_variant() {
 			"${EXTRA_ARGS[@]}"
 }
 
+# Vanilla LoRA baseline: no slice-init at all.
+run_vanilla_baseline() {
+	local sequence_name="$1"
+	local run_name
+	run_name="vanilla_$(echo "${sequence_name}" | tr '[:upper:]-' '[:lower:]_')_${RUN_SUFFIX}"
+
+	echo "============================================================"
+	echo "Baseline  : vanilla LoRA"
+	echo "Sequence  : ${sequence_name}"
+	echo "Run name  : ${run_name}"
+	echo "GPU       : ${GPU}"
+	echo "Rank      : ${RANK}"
+	echo "============================================================"
+
+	CUDA_VISIBLE_DEVICES="${GPU}" \
+		python -m cl_lora.orchestrator \
+			--sequence "${sequence_name}" \
+			--run-name "${run_name}" \
+			--rank "${RANK}" \
+			--train-only \
+			--keep-all-checkpoints \
+			--log-level "${LOG_LEVEL}" \
+			"${EXTRA_ARGS[@]}"
+}
+
+# LoRAM baseline: DST-based init, no gradient computation.
+run_loram_baseline() {
+	local sequence_name="$1"
+	local run_name
+	run_name="loram_$(echo "${sequence_name}" | tr '[:upper:]-' '[:lower:]_')_${RUN_SUFFIX}"
+
+	echo "============================================================"
+	echo "Baseline  : LoRAM"
+	echo "Sequence  : ${sequence_name}"
+	echo "Run name  : ${run_name}"
+	echo "GPU       : ${GPU}"
+	echo "Rank      : ${RANK}"
+	echo "============================================================"
+
+	CUDA_VISIBLE_DEVICES="${GPU}" \
+		python -m cl_lora.orchestrator \
+			--sequence "${sequence_name}" \
+			--run-name "${run_name}" \
+			--rank "${RANK}" \
+			--slice-init \
+			--slice-init-method loram \
+			--slice-cache-dir "${SLICE_CACHE_DIR}" \
+			--slice-max-steps "${SLICE_MAX_STEPS}" \
+			--train-only \
+			--keep-all-checkpoints \
+			--log-level "${LOG_LEVEL}" \
+			"${EXTRA_ARGS[@]}"
+}
+
+# LoRA-GA baseline: SVD on forget gradients only.
+# $1 sequence, $2 svd_selection ("lora_ga" disjoint slices, or "top_r_no_sigma")
+run_lora_ga_baseline() {
+	local sequence_name="$1"
+	local svd_selection="$2"
+	local run_name
+	run_name="lora_ga_${svd_selection}_$(echo "${sequence_name}" | tr '[:upper:]-' '[:lower:]_')_${RUN_SUFFIX}"
+
+	echo "============================================================"
+	echo "Baseline  : LoRA-GA (svd-selection=${svd_selection})"
+	echo "Sequence  : ${sequence_name}"
+	echo "Run name  : ${run_name}"
+	echo "GPU       : ${GPU}"
+	echo "Rank      : ${RANK}"
+	echo "============================================================"
+
+	CUDA_VISIBLE_DEVICES="${GPU}" \
+		python -m cl_lora.orchestrator \
+			--sequence "${sequence_name}" \
+			--run-name "${run_name}" \
+			--rank "${RANK}" \
+			--slice-init \
+			--slice-init-method lora_ga \
+			--slice-svd-selection "${svd_selection}" \
+			--slice-cache-dir "${SLICE_CACHE_DIR}" \
+			--slice-max-steps "${SLICE_MAX_STEPS}" \
+			--train-only \
+			--keep-all-checkpoints \
+			--log-level "${LOG_LEVEL}" \
+			"${EXTRA_ARGS[@]}"
+}
+
 # Variants: (tag, flags...)
 # A.1 CAGrad at c in {0.25, 0.5, 0.75}
 # A.2 GradVac (phi=0, beta=0.5)
@@ -98,6 +184,13 @@ VARIANTS=(
 )
 
 for sequence_name in ${SEQUENCES[@]}; do
+	# Baselines
+	run_vanilla_baseline "${sequence_name}"
+	run_loram_baseline   "${sequence_name}"
+	run_lora_ga_baseline "${sequence_name}" "lora_ga"
+	run_lora_ga_baseline "${sequence_name}" "top_r_no_sigma"
+
+	# Projection / SVD-selection variants
 	for entry in "${VARIANTS[@]}"; do
 		tag="${entry%%|*}"
 		flags_str="${entry#*|}"
