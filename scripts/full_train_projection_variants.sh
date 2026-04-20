@@ -27,7 +27,7 @@ LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 # Sequences to sweep over.
 SEQUENCES=("${SEQUENCES[@]:-NI-Seq-Opposite-v3 NI-Seq-Opposite-v2 NI-Seq-Opposite-v4 NI-Seq-G2 TRACE }")
-# SEQUENCES=("${SEQUENCES[@]:-NI-Seq-G2 TRACE NI-Seq-G1}")
+# SEQUENCES=("${SEQUENCES[@]:-NI-Seq-Dummy}")
 
 EXTRA_ARGS=("$@")
 
@@ -197,11 +197,7 @@ for sequence_name in ${SEQUENCES[@]}; do
 	run_lora_ga_baseline "${sequence_name}" "lora_ga"
 	run_lora_ga_baseline "${sequence_name}" "top_r_no_sigma"
 
-	# Basic slice baselines (default slice init with both truncation styles).
-	run_slice_variant "${sequence_name}" "slice_basic_lora_ga"        --slice-svd-selection lora_ga
-	run_slice_variant "${sequence_name}" "slice_basic_top_r_no_sigma" --slice-svd-selection top_r_no_sigma
-
-	# Projection / SVD-selection variants
+	# Projection / SVD-selection variants (includes basic slice baselines)
 	for entry in "${VARIANTS[@]}"; do
 		tag="${entry%%|*}"
 		flags_str="${entry#*|}"
