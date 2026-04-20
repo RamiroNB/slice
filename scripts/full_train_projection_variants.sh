@@ -166,8 +166,9 @@ run_lora_ga_baseline() {
 
 VARIANTS=(
 	# tag|flags
+	"slice_basic_lora_ga|--slice-svd-selection lora_ga"
+	"slice_basic_top_r_no_sigma|--slice-svd-selection top_r_no_sigma"
 	"magpreserve|--slice-projection-method magnitude_preserving"
-	"svd_topr_no_sigma|--slice-svd-selection top_r_no_sigma"
 	"combo_cagrad_mag_topr|--slice-projection-method cagrad --slice-cagrad-c 0.5 --slice-magnitude-preserve --slice-svd-selection top_r_no_sigma"
 	"cagrad_c025|--slice-projection-method cagrad --slice-cagrad-c 0.25"
 	"cagrad_c050|--slice-projection-method cagrad --slice-cagrad-c 0.50"
@@ -189,6 +190,10 @@ for sequence_name in ${SEQUENCES[@]}; do
 	run_loram_baseline   "${sequence_name}"
 	run_lora_ga_baseline "${sequence_name}" "lora_ga"
 	run_lora_ga_baseline "${sequence_name}" "top_r_no_sigma"
+
+	# Basic slice baselines (default slice init with both truncation styles).
+	run_slice_variant "${sequence_name}" "slice_basic_lora_ga"        --slice-svd-selection lora_ga
+	run_slice_variant "${sequence_name}" "slice_basic_top_r_no_sigma" --slice-svd-selection top_r_no_sigma
 
 	# Projection / SVD-selection variants
 	for entry in "${VARIANTS[@]}"; do

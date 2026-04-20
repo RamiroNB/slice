@@ -32,6 +32,8 @@ SEQUENCES=("${SEQUENCES[@]:-NI-Seq-Opposite-v3 NI-Seq-Opposite-v2 NI-Seq-Opposit
 
 # Keep the VARIANT tag list in sync with full_train_projection_variants.sh.
 VARIANT_TAGS=(
+	slice_basic_lora_ga
+	slice_basic_top_r_no_sigma
 	cagrad_c025
 	cagrad_c050
 	cagrad_c075
@@ -45,7 +47,6 @@ VARIANT_TAGS=(
 	nullspace_r8
 	nullspace_r32
 	magpreserve
-	svd_topr_no_sigma
 	combo_cagrad_mag_topr
 )
 
