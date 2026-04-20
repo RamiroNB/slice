@@ -157,9 +157,12 @@ def run_sequence(
     keep_all_checkpoints: bool = False,
     general_eval_strategy: str = "every_stage",
     seen_eval_strategy: str = "full_matrix",
+    train_only: bool = False,
     orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
+    run_output_dir = run_output_dir.resolve()
+    train_output_dir = train_output_dir.resolve()
     run_output_dir.mkdir(parents=True, exist_ok=True)
     sequence = get_sequence(sequence_name)
     task_order = [task.name for task in sequence.tasks]
@@ -327,34 +330,71 @@ def run_sequence(
         if skip_general:
             print(f"  Skipping general eval (strategy=final_only)")
 
-        evaluation = evaluate_all(
-            model=model,
-            tokenizer=tokenizer,
-            seen_tasks=eval_seen,
-            output_dir=str(stage_eval_dir),
-            general_eval_task_keys=general_eval_keys,
-            eval_size=eval_size,
-            task_eval_samples=task_eval_samples,
-            task_eval_max_new_tokens=task_eval_max_new_tokens,
-            quick_eval=quick_eval,
-            skip_general_eval=skip_general,
-            seed=seed,
-        )
-
-        stage_record = {
-            "stage": idx,
-            "trained_task": task_name,
-            "train_report": train_report,
-            "seen_tasks": evaluation["seen_tasks"],
-            "general": evaluation["general"],
-        }
-        stage_records.append(stage_record)
-
-        _write_json(stage_eval_dir / "stage_record.json", stage_record)
+        # Save the merged checkpoint BEFORE evaluation so it is always available
+        # even if evaluation is skipped or run separately later.
         checkpoint_dir = checkpoint_root / f"stage_{idx:02d}_{safe_task_name}" / "merged_model"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(checkpoint_dir))
         tokenizer.save_pretrained(str(checkpoint_dir))
+        print(f"  Checkpoint saved: {checkpoint_dir}")
+
+        # Write a manifest that a standalone eval pass can consume without
+        # needing to re-run training.
+        stage_eval_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            stage_eval_dir / "eval_manifest.json",
+            {
+                "stage": idx,
+                "trained_task": task_name,
+                "sequence": sequence_name,
+                "seen_tasks": [getattr(t, "name", str(t)) for t in seen_tasks],
+                "eval_seen_tasks": [getattr(t, "name", str(t)) for t in eval_seen],
+                "model_path": str(checkpoint_dir.resolve()),
+                "general_eval_keys": general_eval_keys,
+                "skip_general_eval": bool(skip_general),
+                "quick_eval": bool(quick_eval),
+                "eval_size": int(eval_size),
+                "task_eval_samples": int(task_eval_samples),
+                "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
+                "seed": int(seed),
+                "train_output_dir": str(stage_train_dir),
+            },
+        )
+
+        if train_only:
+            print("  Skipping evaluation (--train-only mode).")
+            stage_record = {
+                "stage": idx,
+                "trained_task": task_name,
+                "train_report": train_report,
+                "seen_tasks": {},
+                "general": {"gp": {}, "ip": {}, "gp_mean": None, "ip_mean": None, "mode": "skipped"},
+            }
+        else:
+            evaluation = evaluate_all(
+                model=model,
+                tokenizer=tokenizer,
+                seen_tasks=eval_seen,
+                output_dir=str(stage_eval_dir),
+                general_eval_task_keys=general_eval_keys,
+                eval_size=eval_size,
+                task_eval_samples=task_eval_samples,
+                task_eval_max_new_tokens=task_eval_max_new_tokens,
+                quick_eval=quick_eval,
+                skip_general_eval=skip_general,
+                seed=seed,
+            )
+            stage_record = {
+                "stage": idx,
+                "trained_task": task_name,
+                "train_report": train_report,
+                "seen_tasks": evaluation["seen_tasks"],
+                "general": evaluation["general"],
+            }
+
+        stage_records.append(stage_record)
+
+        _write_json(stage_eval_dir / "stage_record.json", stage_record)
 
         _write_json(
             partial_path,
@@ -376,19 +416,30 @@ def run_sequence(
                 shutil.rmtree(old_checkpoint)
                 print(f"  Cleaned up old checkpoint: {old_checkpoint}")
 
-    summary = compute_cl_metrics(stage_records=stage_records, task_order=task_order)
-    final_payload = {
-        "sequence": sequence_name,
-        "description": sequence.description,
-        "task_order": task_order,
-        "general_eval_keys": general_eval_keys,
-        "stage_records": stage_records,
-        "summary": summary,
-    }
-
-    _write_json(run_output_dir / "results_matrix.json", summary["results_matrix"])
-    _write_json(run_output_dir / "metrics.json", summary["metrics"])
-    _write_json(run_output_dir / "run_summary.json", final_payload)
+    if train_only:
+        final_payload = {
+            "sequence": sequence_name,
+            "description": sequence.description,
+            "task_order": task_order,
+            "stage_records": stage_records,
+            "summary": None,
+        }
+        _write_json(run_output_dir / "run_summary.json", final_payload)
+        print("\nTraining complete. Run eval separately with:")
+        print(f"  python -m cl_lora.eval_standalone run --run-dir {run_output_dir}")
+    else:
+        summary = compute_cl_metrics(stage_records=stage_records, task_order=task_order)
+        final_payload = {
+            "sequence": sequence_name,
+            "description": sequence.description,
+            "task_order": task_order,
+            "general_eval_keys": general_eval_keys,
+            "stage_records": stage_records,
+            "summary": summary,
+        }
+        _write_json(run_output_dir / "results_matrix.json", summary["results_matrix"])
+        _write_json(run_output_dir / "metrics.json", summary["metrics"])
+        _write_json(run_output_dir / "run_summary.json", final_payload)
 
     if save_final_model:
         model_dir = run_output_dir / "final_merged_model"
@@ -410,6 +461,12 @@ def main() -> None:
         choices=["core", "all"],
         default="core",
         help="Use the core 4 general tasks or all configured general tasks.",
+    )
+    parser.add_argument(
+        "--train-only",
+        action="store_true",
+        help="Skip all evaluation. Saves checkpoints and eval_manifest.json at each stage "
+             "so eval can be run later with: python -m cl_lora.eval_standalone run --run-dir <dir>",
     )
     parser.add_argument(
         "--quick-eval",
@@ -521,7 +578,10 @@ def main() -> None:
 
     print(f"Sequence: {args.sequence}")
     print(f"General eval tasks: {general_eval_keys}")
-    print(f"Quick eval mode: {'ON (perplexity-only)' if args.quick_eval else 'OFF'}")
+    if args.train_only:
+        print("Eval mode: DISABLED (--train-only)")
+    else:
+        print(f"Quick eval mode: {'ON (perplexity-only)' if args.quick_eval else 'OFF'}")
     print(f"Results dir: {run_output_dir}")
 
     payload = run_sequence(
@@ -554,11 +614,13 @@ def main() -> None:
         keep_all_checkpoints=args.keep_all_checkpoints,
         general_eval_strategy=args.general_eval_strategy,
         seen_eval_strategy=args.seen_eval_strategy,
+        train_only=args.train_only,
         orchestrator_config=orchestrator_config,
     )
 
-    print("\n=== Final Metrics ===")
-    print(json.dumps(payload["summary"]["metrics"], indent=2))
+    if not args.train_only:
+        print("\n=== Final Metrics ===")
+        print(json.dumps(payload["summary"]["metrics"], indent=2))
 
 
 if __name__ == "__main__":
