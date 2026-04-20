@@ -155,14 +155,20 @@ run_lora_ga_baseline() {
 }
 
 # Variants: (tag, flags...)
-# A.1 CAGrad at c in {0.25, 0.5, 0.75}
-# A.2 GradVac (phi=0, beta=0.5)
-# A.3 cosine-threshold sweep tau in {-0.05, 0.0, 0.05, 0.1}
-# A.4 per-layer threshold with delta in {0.0, 0.05}
-# A.5 null-space projection (rank 8, 32)
-# A.6 magnitude-preserving (applied on top of pcgrad)
+# A.1 CAGrad at c in {0.25, 0.5, 0.75}                -- supports global projection
+# A.2 GradVac (phi=0, beta=0.5)                       -- per_module only (see below)
+# A.3 cosine-threshold sweep tau in {-0.05, 0.0, 0.05, 0.1} -- supports global
+# A.4 per-layer threshold with delta in {0.0, 0.05}   -- per_module only
+# A.5 null-space projection (rank 8, 32)              -- per_module only
+# A.6 magnitude-preserving (applied on top of pcgrad) -- supports global
 # C.16 top_r_no_sigma SVD selection (with default pcgrad)
 # Plus a "combo" variant (cagrad + magnitude preserve + top_r_no_sigma)
+#
+# Global projection is defined via the distributive property (sum of per-module
+# dot products / squared norms) for pcgrad / cagrad / magnitude_preserving.
+# For nullspace / gradvac / per_layer_threshold the math has no meaningful
+# global analog and the orchestrator now raises an error if global is requested,
+# so those variants explicitly override the projection mode to per_module.
 
 VARIANTS=(
 	# tag|flags
@@ -173,15 +179,15 @@ VARIANTS=(
 	"cagrad_c025|--slice-projection-method cagrad --slice-cagrad-c 0.25"
 	"cagrad_c050|--slice-projection-method cagrad --slice-cagrad-c 0.50"
 	"cagrad_c075|--slice-projection-method cagrad --slice-cagrad-c 0.75"
-	"gradvac_phi0_b05|--slice-projection-method gradvac --slice-gradvac-phi 0.0 --slice-gradvac-beta 0.5"
+	"gradvac_phi0_b05|--slice-projection-method gradvac --slice-gradvac-phi 0.0 --slice-gradvac-beta 0.5 --slice-grad-projection-mode per_module"
 	"costau_neg005|--slice-cosine-threshold -0.05"
 	"costau_000|--slice-cosine-threshold 0.0"
 	"costau_005|--slice-cosine-threshold 0.05"
 	"costau_010|--slice-cosine-threshold 0.10"
-	"perlayer_d000|--slice-per-layer-threshold --slice-per-layer-threshold-delta 0.0"
-	"perlayer_d005|--slice-per-layer-threshold --slice-per-layer-threshold-delta 0.05"
-	"nullspace_r8|--slice-projection-method nullspace --slice-nullspace-rank 8"
-	"nullspace_r32|--slice-projection-method nullspace --slice-nullspace-rank 32"
+	"perlayer_d000|--slice-per-layer-threshold --slice-per-layer-threshold-delta 0.0 --slice-grad-projection-mode per_module"
+	"perlayer_d005|--slice-per-layer-threshold --slice-per-layer-threshold-delta 0.05 --slice-grad-projection-mode per_module"
+	"nullspace_r8|--slice-projection-method nullspace --slice-nullspace-rank 8 --slice-grad-projection-mode per_module"
+	"nullspace_r32|--slice-projection-method nullspace --slice-nullspace-rank 32 --slice-grad-projection-mode per_module"
 )
 
 for sequence_name in ${SEQUENCES[@]}; do

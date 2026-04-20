@@ -206,40 +206,42 @@ def compute_slice_inits(
         grads_r = {k: v / float(denom_r) for k, v in grads_r.items()}
 
     if config.grad_project and grads_r is not None:
-        method = str(getattr(config, "projection_method", "pcgrad")).lower()
+        method = str(config.projection_method).lower()
+        global_projection = str(config.grad_projection_mode).lower() == "global"
         use_advanced = (
             method != "pcgrad"
-            or getattr(config, "cosine_threshold", None) is not None
-            or bool(getattr(config, "per_layer_threshold", False))
-            or bool(getattr(config, "magnitude_preserve", False))
+            or config.cosine_threshold is not None
+            or bool(config.per_layer_threshold)
+            or bool(config.magnitude_preserve)
         )
         if use_advanced:
             logger.info(
-                "Advanced projection: method=%s cos_tau=%s per_layer=%s mag_preserve=%s",
+                "Advanced projection: method=%s mode=%s cos_tau=%s per_layer=%s mag_preserve=%s",
                 method,
-                getattr(config, "cosine_threshold", None),
-                getattr(config, "per_layer_threshold", False),
-                getattr(config, "magnitude_preserve", False),
+                "global" if global_projection else "per_module",
+                config.cosine_threshold,
+                config.per_layer_threshold,
+                config.magnitude_preserve,
             )
             combined, projection_stats = project_gradients_advanced(
                 grads_forget=grads_f,
                 grads_retain=grads_r,
                 method=method,
-                cosine_threshold=getattr(config, "cosine_threshold", None),
-                per_layer_threshold=bool(getattr(config, "per_layer_threshold", False)),
-                per_layer_threshold_delta=float(getattr(config, "per_layer_threshold_delta", 0.0)),
-                cagrad_c=float(getattr(config, "cagrad_c", 0.5)),
-                gradvac_phi=float(getattr(config, "gradvac_phi", 0.0)),
-                gradvac_beta=float(getattr(config, "gradvac_beta", 0.5)),
-                magnitude_preserve=bool(getattr(config, "magnitude_preserve", False)),
-                nullspace_rank=int(getattr(config, "nullspace_rank", 8)),
-                nullspace_sv_threshold=float(getattr(config, "nullspace_sv_threshold", 0.0)),
+                cosine_threshold=config.cosine_threshold,
+                per_layer_threshold=bool(config.per_layer_threshold),
+                per_layer_threshold_delta=float(config.per_layer_threshold_delta),
+                cagrad_c=float(config.cagrad_c),
+                gradvac_phi=float(config.gradvac_phi),
+                gradvac_beta=float(config.gradvac_beta),
+                magnitude_preserve=bool(config.magnitude_preserve),
+                nullspace_rank=int(config.nullspace_rank),
+                nullspace_sv_threshold=float(config.nullspace_sv_threshold),
                 always_project=bool(config.grad_project_always),
                 add_retain_grad=bool(config.add_retain_grad),
+                global_projection=global_projection,
             )
             logger.info("Built advanced projected gradient matrix for %d modules", len(combined))
         else:
-            global_projection = str(config.grad_projection_mode).lower() == "global"
             logger.info(
                 "Projecting slice gradients (mode=%s, always_project=%s, add_retain_grad=%s)",
                 "global" if global_projection else "per_module",
@@ -284,7 +286,7 @@ def compute_slice_inits(
         weight_var = float(target_params[name].detach().float().var().item())
         ab = build_ab_from_gradient(
             g, r=r_use, weight_var=weight_var,
-            svd_selection=str(getattr(config, "svd_selection", "lora_ga")),
+            svd_selection=str(config.svd_selection),
         )
         logger.debug("Built A/B for %s: A_shape=%s B_shape=%s", name, tuple(ab['A'].shape), tuple(ab['B'].shape))
         inits[name] = ab
@@ -356,17 +358,17 @@ def load_or_compute_slice_inits(
         "retain_grad_accum": None if is_lora_ga else config.retain_grad_accum,
         "retain_batch_size_set": "all_tasks" if is_lora_ga else config.retain_batch_size_set,
         "single_retain_task_mode": False if is_lora_ga else config.single_retain_task_mode,
-        "projection_method": "pcgrad" if is_lora_ga else str(getattr(config, "projection_method", "pcgrad")),
-        "cosine_threshold": None if is_lora_ga else getattr(config, "cosine_threshold", None),
-        "per_layer_threshold": False if is_lora_ga else bool(getattr(config, "per_layer_threshold", False)),
-        "per_layer_threshold_delta": 0.0 if is_lora_ga else float(getattr(config, "per_layer_threshold_delta", 0.0)),
-        "cagrad_c": 0.0 if is_lora_ga else float(getattr(config, "cagrad_c", 0.5)),
-        "gradvac_phi": 0.0 if is_lora_ga else float(getattr(config, "gradvac_phi", 0.0)),
-        "gradvac_beta": 0.0 if is_lora_ga else float(getattr(config, "gradvac_beta", 0.5)),
-        "magnitude_preserve": False if is_lora_ga else bool(getattr(config, "magnitude_preserve", False)),
-        "nullspace_rank": 0 if is_lora_ga else int(getattr(config, "nullspace_rank", 8)),
-        "nullspace_sv_threshold": 0.0 if is_lora_ga else float(getattr(config, "nullspace_sv_threshold", 0.0)),
-        "svd_selection": str(getattr(config, "svd_selection", "lora_ga")),
+        "projection_method": "pcgrad" if is_lora_ga else str(config.projection_method),
+        "cosine_threshold": None if is_lora_ga else config.cosine_threshold,
+        "per_layer_threshold": False if is_lora_ga else bool(config.per_layer_threshold),
+        "per_layer_threshold_delta": 0.0 if is_lora_ga else float(config.per_layer_threshold_delta),
+        "cagrad_c": 0.0 if is_lora_ga else float(config.cagrad_c),
+        "gradvac_phi": 0.0 if is_lora_ga else float(config.gradvac_phi),
+        "gradvac_beta": 0.0 if is_lora_ga else float(config.gradvac_beta),
+        "magnitude_preserve": False if is_lora_ga else bool(config.magnitude_preserve),
+        "nullspace_rank": 0 if is_lora_ga else int(config.nullspace_rank),
+        "nullspace_sv_threshold": 0.0 if is_lora_ga else float(config.nullspace_sv_threshold),
+        "svd_selection": str(config.svd_selection),
         "lora": lora_payload,
         "model": {
             "class": model.__class__.__name__,
