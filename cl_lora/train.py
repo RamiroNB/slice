@@ -7,7 +7,7 @@ import json
 import os
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import accelerate
 import torch
@@ -99,6 +99,29 @@ def _tokenize_dataset(dataset, tokenizer, max_length: int):
     )
 
 
+def load_model_with_adapters(
+    base_model_path: str,
+    adapter_paths: List[str],
+    hf_token: str | None = HF_TOKEN,
+    torch_dtype: torch.dtype = torch.bfloat16,
+    device_map: str = "auto",
+):
+    """Load base model and apply LoRA adapters sequentially, merging each one.
+
+    Reconstructs the cumulative model state for stage k by loading the base
+    model and merging adapter_1, adapter_2, ..., adapter_k in order.
+    """
+    from peft import PeftModel
+
+    model = load_base_model(
+        base_model_path, hf_token=hf_token, torch_dtype=torch_dtype, device_map=device_map
+    )
+    for adapter_path in adapter_paths:
+        model = PeftModel.from_pretrained(model, adapter_path)
+        model = model.merge_and_unload()
+    return model
+
+
 def train_on_task(
     model,
     tokenizer,
@@ -119,6 +142,7 @@ def train_on_task(
     seed: int = 42,
     use_bf16: bool = True,
     save_adapter: bool = True,
+    adapter_checkpoint_path: str | None = None,
     slice_enabled: bool = False,
     slice_cache_dir: str = "slice_cache",
     slice_max_steps: int = 100,
@@ -225,6 +249,11 @@ def train_on_task(
 
     if save_adapter:
         lora_model.save_pretrained(str(output_path / "adapter"))
+
+    if adapter_checkpoint_path:
+        adapter_cp = Path(adapter_checkpoint_path)
+        adapter_cp.mkdir(parents=True, exist_ok=True)
+        lora_model.save_pretrained(str(adapter_cp))
 
     merge_fn = getattr(lora_model, "merge_and_unload", None)
     merged_model = merge_fn() if callable(merge_fn) else lora_model

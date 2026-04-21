@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import re
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -20,13 +19,13 @@ try:
     from .metrics import compute_cl_metrics
     from .repro import set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
-    from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, train_on_task
+    from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, load_model_with_adapters, train_on_task
 except ImportError:
     from eval import evaluate_all
     from metrics import compute_cl_metrics
     from repro import set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
-    from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, train_on_task
+    from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, load_model_with_adapters, train_on_task
 
 
 def _collect_fn_defaults(fn) -> Dict[str, Any]:
@@ -250,15 +249,21 @@ def run_sequence(
             return final_payload
 
         if completed > 0:
-            last_task_name = sequence.tasks[completed - 1].name
-            last_safe = _safe_name(last_task_name)
-            checkpoint_dir = checkpoint_root / f"stage_{completed:02d}_{last_safe}" / "merged_model"
-            if not checkpoint_dir.exists():
+            base_model_ckpt = checkpoint_root / "base_model"
+            if not base_model_ckpt.exists():
                 raise FileNotFoundError(
-                    f"Resume failed: missing checkpoint at {checkpoint_dir}."
+                    f"Resume failed: base model checkpoint not found at {base_model_ckpt}. "
+                    "Runs started before the adapter-only checkpoint format was introduced cannot be resumed."
                 )
-            tokenizer = build_tokenizer(model_name=str(checkpoint_dir), hf_token=HF_TOKEN)
-            model = load_base_model(model_name=str(checkpoint_dir), hf_token=HF_TOKEN)
+            adapter_paths_resume = [
+                str(checkpoint_root / f"stage_{i + 1:02d}_{_safe_name(sequence.tasks[i].name)}" / "adapter")
+                for i in range(completed)
+            ]
+            for ap in adapter_paths_resume:
+                if not Path(ap).exists():
+                    raise FileNotFoundError(f"Resume failed: missing adapter checkpoint at {ap}.")
+            tokenizer = build_tokenizer(model_name=str(base_model_ckpt), hf_token=HF_TOKEN)
+            model = load_model_with_adapters(str(base_model_ckpt), adapter_paths_resume)
         else:
             tokenizer = build_tokenizer(model_name=model_name, hf_token=HF_TOKEN)
             model = load_base_model(model_name=model_name, hf_token=HF_TOKEN)
@@ -269,6 +274,20 @@ def run_sequence(
     run_cfg_payload["model"] = _collect_model_info(model)
     run_cfg_payload["tokenizer"] = _collect_tokenizer_info(tokenizer)
     _write_json(run_output_dir / "run_config.json", run_cfg_payload)
+
+    # Save the unmodified base model once. All stage checkpoints store only
+    # LoRA adapters; the full model is reconstructed by merging adapters onto
+    # this base at eval time.
+    base_model_ckpt = checkpoint_root / "base_model"
+    if start_stage == 1:
+        base_model_ckpt.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(str(base_model_ckpt))
+        tokenizer.save_pretrained(str(base_model_ckpt))
+        print(f"Base model saved: {base_model_ckpt}")
+    elif not base_model_ckpt.exists():
+        raise FileNotFoundError(
+            f"Resuming at stage {start_stage} but base model checkpoint not found at {base_model_ckpt}."
+        )
 
     for idx in range(start_stage, len(sequence.tasks) + 1):
         task = sequence.tasks[idx - 1]
@@ -286,8 +305,10 @@ def run_sequence(
         else:
             prev_task_name = sequence.tasks[idx - 2].name
             prev_safe = _safe_name(prev_task_name)
-            prev_checkpoint_dir = checkpoint_root / f"stage_{idx - 1:02d}_{prev_safe}" / "merged_model"
-            slice_cache_context = f"checkpoint:{prev_checkpoint_dir}"
+            prev_adapter_dir = checkpoint_root / f"stage_{idx - 1:02d}_{prev_safe}" / "adapter"
+            slice_cache_context = f"adapter:{prev_adapter_dir}"
+
+        adapter_checkpoint_dir = checkpoint_root / f"stage_{idx:02d}_{safe_task_name}" / "adapter"
 
         model, train_report = train_on_task(
             model=model,
@@ -298,6 +319,7 @@ def run_sequence(
             seed=seed,
             retain_tasks=retain_tasks,
             rank=rank,
+            adapter_checkpoint_path=str(adapter_checkpoint_dir),
             slice_enabled=slice_enabled,
             slice_cache_dir=slice_cache_dir,
             slice_cache_context=slice_cache_context,
@@ -313,6 +335,7 @@ def run_sequence(
             slice_single_retain_task_mode=slice_single_retain_task_mode,
             slice_init_method=slice_init_method,
         )
+        print(f"  Adapter checkpoint saved: {adapter_checkpoint_dir}")
 
         seen_tasks.append(task)
 
@@ -330,13 +353,12 @@ def run_sequence(
         if skip_general:
             print(f"  Skipping general eval (strategy=final_only)")
 
-        # Save the merged checkpoint BEFORE evaluation so it is always available
-        # even if evaluation is skipped or run separately later.
-        checkpoint_dir = checkpoint_root / f"stage_{idx:02d}_{safe_task_name}" / "merged_model"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(str(checkpoint_dir))
-        tokenizer.save_pretrained(str(checkpoint_dir))
-        print(f"  Checkpoint saved: {checkpoint_dir}")
+        # Build the ordered list of adapter checkpoint paths up to this stage.
+        # eval_standalone uses these to reconstruct model+adapter_1+...+adapter_k.
+        stage_adapter_paths = [
+            str((checkpoint_root / f"stage_{i + 1:02d}_{_safe_name(sequence.tasks[i].name)}" / "adapter").resolve())
+            for i in range(idx)
+        ]
 
         # Write a manifest that a standalone eval pass can consume without
         # needing to re-run training.
@@ -349,7 +371,8 @@ def run_sequence(
                 "sequence": sequence_name,
                 "seen_tasks": [getattr(t, "name", str(t)) for t in seen_tasks],
                 "eval_seen_tasks": [getattr(t, "name", str(t)) for t in eval_seen],
-                "model_path": str(checkpoint_dir.resolve()),
+                "base_model_path": str(base_model_ckpt.resolve()),
+                "adapter_paths": stage_adapter_paths,
                 "general_eval_keys": general_eval_keys,
                 "skip_general_eval": bool(skip_general),
                 "quick_eval": bool(quick_eval),
@@ -406,15 +429,8 @@ def run_sequence(
             },
         )
 
-        # Remove the previous stage checkpoint to save disk space.
-        # Only the most recent checkpoint is needed for --resume.
-        if not keep_all_checkpoints and idx >= 2:
-            prev_task = sequence.tasks[idx - 2]
-            prev_safe = _safe_name(prev_task.name)
-            old_checkpoint = checkpoint_root / f"stage_{idx - 1:02d}_{prev_safe}"
-            if old_checkpoint.exists():
-                shutil.rmtree(old_checkpoint)
-                print(f"  Cleaned up old checkpoint: {old_checkpoint}")
+        # Adapter checkpoints are kept for all stages — they are needed by
+        # eval_standalone to reconstruct any cumulative model state.
 
     if train_only:
         final_payload = {
