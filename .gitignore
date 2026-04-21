@@ -10,12 +10,14 @@ datasets_cache/
 plots/
 results/
 slice_cache_diag/
+slice_cache/
 
 .vscode/
 outputs/
 
 # C extensions
 *.so
+z/
 
 # Distribution / packaging
 .Python
