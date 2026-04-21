@@ -14,6 +14,6 @@ datasets
 peft
 requests
 typer
-flash-attn
+# flash-attn
 # lm-eval add from github egg
 git+https://github.com/EleutherAI/lm-evaluation-harness.git#egg=lm-eval
