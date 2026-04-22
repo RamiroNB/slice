@@ -160,9 +160,38 @@ CUDA_VISIBLE_DEVICES=0 python -m cl_lora.orchestrator \
 
 ## Checkpoint Management
 
-By default, only the most recent stage checkpoint is kept on disk (previous ones are deleted after the next stage completes). This avoids accumulating ~6 GB per stage for large models.
+Checkpoints use an adapter-only format to save disk space. Instead of saving a full merged model (~6 GB) per stage, only the base model is saved once and each stage saves its LoRA adapter weights (~400 MB):
 
-- `--keep-all-checkpoints`: Preserve all intermediate stage checkpoints.
+```
+results/<sequence>/<run_name>/checkpoints/
+├── base_model/                          # saved once (~6 GB)
+├── stage_01_<task>/adapter/             # LoRA weights only (~400 MB)
+│   ├── adapter_model.safetensors
+│   ├── adapter_config.json
+│   └── init_correction.pt              # only present when --slice-init is used
+├── stage_02_<task>/adapter/
+└── ...
+```
+
+At eval time, `eval_standalone` reconstructs the model for stage k by loading the base model and merging adapters 1..k in order — this is numerically identical to the in-memory merged model from training.
+
+For runs using `--slice-init`, each adapter directory also contains `init_correction.pt` which stores the LoRA init matrices. This is required to correctly replay the weight absorption step during reconstruction.
+
+To separate training from evaluation (recommended for long sequences):
+
+```bash
+# Train only — saves checkpoints and eval manifests, skips evaluation
+CUDA_VISIBLE_DEVICES=0 python -m cl_lora.orchestrator \
+  --sequence NI-Seq-G1 \
+  --run-name my_run \
+  --train-only
+
+# Evaluate all stages from saved checkpoints
+CUDA_VISIBLE_DEVICES=0 python -m cl_lora.eval_standalone run \
+  --run-dir results/NI-Seq-G1/my_run \
+  --task-eval-samples 64 \
+  --skip-general-eval
+```
 
 ## Dataset Caching
 
@@ -183,7 +212,8 @@ Training artifacts:
 Experiment outputs:
 
 - results/<sequence>/<run_name>/stages/stage_xx_<task_name>/stage_record.json
-- results/<sequence>/<run_name>/checkpoints/stage_xx_<task_name>/merged_model/
+- results/<sequence>/<run_name>/checkpoints/base_model/
+- results/<sequence>/<run_name>/checkpoints/stage_xx_<task_name>/adapter/
 - results/<sequence>/<run_name>/stage_records.partial.json
 - results/<sequence>/<run_name>/results_matrix.json
 - results/<sequence>/<run_name>/metrics.json

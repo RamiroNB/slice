@@ -27,13 +27,13 @@ try:
     from .metrics import compute_cl_metrics
     from .repro import set_global_seed
     from .task_sequences import get_sequence
-    from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model
+    from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, load_model_with_adapters
 except ImportError:
     from eval import evaluate_all
     from metrics import compute_cl_metrics
     from repro import set_global_seed
     from task_sequences import get_sequence
-    from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model
+    from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, load_model_with_adapters
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -96,10 +96,6 @@ def run_eval_from_manifest(
             return cli_val
         return manifest.get(key, default)
 
-    resolved_model_path: str = _get("model_path", model_path)
-    if not resolved_model_path:
-        raise ValueError("--model-path is required when no eval_manifest.json is present.")
-
     resolved_sequence: str = _get("sequence", sequence)
     if not resolved_sequence:
         raise ValueError("--sequence is required when no eval_manifest.json is present.")
@@ -116,25 +112,61 @@ def run_eval_from_manifest(
     stage: int = int(manifest.get("stage", 0))
     trained_task: str = manifest.get("trained_task", "")
 
-    # Resolve the model path to absolute. If the manifest path doesn't exist
-    # (e.g. this is a different machine than where training ran), fall back to
-    # deriving it from the stage_dir: the checkpoint directory mirrors the
-    # stage directory structure under ../checkpoints/<stage_name>/merged_model.
-    abs_model_path = str(Path(resolved_model_path).resolve())
-    if not Path(abs_model_path).is_dir():
-        derived = stage_dir.parent.parent / "checkpoints" / stage_dir.name / "merged_model"
-        if derived.is_dir():
-            abs_model_path = str(derived.resolve())
-            print(f"Manifest model path not found; using derived path: {abs_model_path}")
-        else:
-            raise FileNotFoundError(
-                f"Model checkpoint not found at '{abs_model_path}' "
-                f"or derived path '{derived}'. "
-                f"Ensure the checkpoints/ directory was transferred to this machine."
+    # Detect checkpoint format: new format stores base_model_path + adapter_paths;
+    # old format stores a single model_path pointing to a merged model.
+    raw_adapter_paths: Optional[List[str]] = _get("adapter_paths", None)
+    raw_base_model_path: Optional[str] = _get("base_model_path", model_path)
+
+    if raw_adapter_paths is not None:
+        # New format: reconstruct model by loading base + merging adapters in order.
+        abs_base = str(Path(raw_base_model_path).resolve()) if raw_base_model_path else ""
+        if not Path(abs_base).is_dir():
+            derived_base = stage_dir.parent.parent / "checkpoints" / "base_model"
+            if derived_base.is_dir():
+                abs_base = str(derived_base.resolve())
+                print(f"Base model path not found in manifest; using derived path: {abs_base}")
+            else:
+                raise FileNotFoundError(
+                    f"Base model checkpoint not found at '{abs_base}' or derived '{derived_base}'."
+                )
+
+        resolved_adapter_paths: List[str] = []
+        for ap in raw_adapter_paths:
+            abs_ap = str(Path(ap).resolve())
+            if not Path(abs_ap).is_dir():
+                raise FileNotFoundError(
+                    f"Adapter checkpoint not found at '{abs_ap}'. "
+                    "Ensure the checkpoints/ directory was transferred to this machine."
+                )
+            resolved_adapter_paths.append(abs_ap)
+
+        print(f"Loading base model from: {abs_base}")
+        print(f"Merging {len(resolved_adapter_paths)} adapter(s): {resolved_adapter_paths}")
+        tokenizer = build_tokenizer(model_name=abs_base, hf_token=HF_TOKEN)
+        model = load_model_with_adapters(abs_base, resolved_adapter_paths)
+    else:
+        # Legacy format: single merged-model checkpoint.
+        resolved_model_path: str = _get("model_path", model_path)
+        if not resolved_model_path:
+            raise ValueError(
+                "--model-path is required when no eval_manifest.json is present "
+                "and the manifest does not contain adapter_paths."
             )
-    print(f"Loading model from: {abs_model_path}")
-    tokenizer = build_tokenizer(model_name=abs_model_path, hf_token=HF_TOKEN)
-    model = load_base_model(model_name=abs_model_path, hf_token=HF_TOKEN)
+        abs_model_path = str(Path(resolved_model_path).resolve())
+        if not Path(abs_model_path).is_dir():
+            derived = stage_dir.parent.parent / "checkpoints" / stage_dir.name / "merged_model"
+            if derived.is_dir():
+                abs_model_path = str(derived.resolve())
+                print(f"Manifest model path not found; using derived path: {abs_model_path}")
+            else:
+                raise FileNotFoundError(
+                    f"Model checkpoint not found at '{abs_model_path}' "
+                    f"or derived path '{derived}'. "
+                    f"Ensure the checkpoints/ directory was transferred to this machine."
+                )
+        print(f"Loading model from: {abs_model_path}")
+        tokenizer = build_tokenizer(model_name=abs_model_path, hf_token=HF_TOKEN)
+        model = load_base_model(model_name=abs_model_path, hf_token=HF_TOKEN)
 
     print(f"Resolving {len(resolved_eval_seen_names)} eval tasks from sequence '{resolved_sequence}'")
     eval_seen = _resolve_tasks(resolved_sequence, resolved_eval_seen_names)

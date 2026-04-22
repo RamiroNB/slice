@@ -7,7 +7,7 @@ import json
 import os
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import accelerate
 import torch
@@ -99,6 +99,70 @@ def _tokenize_dataset(dataset, tokenizer, max_length: int):
     )
 
 
+def _apply_init_absorption(peft_model, init_correction: dict) -> None:
+    """Replay the slice-init weight absorption step during model reconstruction.
+
+    During slice init, frozen base weights are modified in-place:
+      W_frozen -= B_init @ A_init * scale
+    This keeps model output unchanged at t=0. When reconstructing a model from
+    the saved adapter (which only stores the trained B/A), this step must be
+    replayed so the reconstructed weights match the true merged weights.
+    """
+    from peft.tuners.lora import Linear as LoraLinear
+
+    named_modules = dict(peft_model.named_modules())
+    for module_name, ab in init_correction.items():
+        module = named_modules.get(module_name)
+        if module is None or not isinstance(module, LoraLinear):
+            continue
+        if not hasattr(module, "get_base_layer"):
+            continue
+        base_layer = module.get_base_layer()
+        base_weight = getattr(base_layer, "weight", None)
+        if not isinstance(base_weight, torch.nn.Parameter):
+            continue
+
+        scaling = float(module.scaling["default"])
+        B = ab["B"].to(device=base_weight.device, dtype=torch.float32)
+        A = ab["A"].to(device=base_weight.device, dtype=torch.float32)
+        offset = (B @ A) * scaling
+
+        orig_dtype = base_weight.dtype
+        base_weight.data.copy_(
+            (base_weight.data.to(torch.float32) - offset).to(orig_dtype)
+        )
+
+
+def load_model_with_adapters(
+    base_model_path: str,
+    adapter_paths: List[str],
+    hf_token: str | None = HF_TOKEN,
+    torch_dtype: torch.dtype = torch.bfloat16,
+    device_map: str = "auto",
+):
+    """Load base model and apply LoRA adapters sequentially, merging each one.
+
+    Reconstructs the cumulative model state for stage k by loading the base
+    model and merging adapter_1, adapter_2, ..., adapter_k in order.
+    If an adapter was trained with slice init, replays the weight absorption
+    step before merging so the result is numerically identical to the
+    in-memory merged model produced during training.
+    """
+    from peft import PeftModel
+
+    model = load_base_model(
+        base_model_path, hf_token=hf_token, torch_dtype=torch_dtype, device_map=device_map
+    )
+    for adapter_path in adapter_paths:
+        model = PeftModel.from_pretrained(model, adapter_path)
+        init_correction_path = Path(adapter_path) / "init_correction.pt"
+        if init_correction_path.exists():
+            init_correction = torch.load(str(init_correction_path), map_location="cpu", weights_only=True)
+            _apply_init_absorption(model, init_correction)
+        model = model.merge_and_unload()
+    return model
+
+
 def train_on_task(
     model,
     tokenizer,
@@ -119,6 +183,7 @@ def train_on_task(
     seed: int = 42,
     use_bf16: bool = True,
     save_adapter: bool = True,
+    adapter_checkpoint_path: str | None = None,
     slice_enabled: bool = False,
     slice_cache_dir: str = "slice_cache",
     slice_max_steps: int = 100,
@@ -187,6 +252,20 @@ def train_on_task(
         )
         logger.info("Slice init applied: num_modules_written=%d", int(num_written))
 
+        # Capture A/B at init time (after absorption has been applied to base weights).
+        # Saved alongside the adapter so load_model_with_adapters can replay absorption.
+        from peft.tuners.lora import Linear as LoraLinear
+        lora_init_correction: dict = {
+            name: {
+                "A": mod.lora_A["default"].weight.detach().cpu().clone(),
+                "B": mod.lora_B["default"].weight.detach().cpu().clone(),
+            }
+            for name, mod in lora_model.named_modules()
+            if isinstance(mod, LoraLinear) and "default" in getattr(mod, "lora_A", {})
+        }
+    else:
+        lora_init_correction = {}
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -225,6 +304,15 @@ def train_on_task(
 
     if save_adapter:
         lora_model.save_pretrained(str(output_path / "adapter"))
+        if lora_init_correction:
+            torch.save(lora_init_correction, output_path / "adapter" / "init_correction.pt")
+
+    if adapter_checkpoint_path:
+        adapter_cp = Path(adapter_checkpoint_path)
+        adapter_cp.mkdir(parents=True, exist_ok=True)
+        lora_model.save_pretrained(str(adapter_cp))
+        if lora_init_correction:
+            torch.save(lora_init_correction, adapter_cp / "init_correction.pt")
 
     merge_fn = getattr(lora_model, "merge_and_unload", None)
     merged_model = merge_fn() if callable(merge_fn) else lora_model
