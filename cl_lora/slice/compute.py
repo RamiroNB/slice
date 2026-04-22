@@ -19,6 +19,7 @@ from .cache import (
 from .config import SliceInitConfig
 from .decompose import build_ab_from_gradient, build_ab_loram
 from .gradients import accumulate_gradients, combine_grads, project_forget_gradients
+from .projections import project_gradients_advanced
 from .utils import build_dataloader, model_device, target_weight_params, tokenize_dataset
 
 logger = logging.getLogger("cl_lora.slice.compute")
@@ -205,23 +206,58 @@ def compute_slice_inits(
         grads_r = {k: v / float(denom_r) for k, v in grads_r.items()}
 
     if config.grad_project and grads_r is not None:
+        method = str(config.projection_method).lower()
         global_projection = str(config.grad_projection_mode).lower() == "global"
-        logger.info(
-            "Projecting slice gradients (mode=%s, always_project=%s, add_retain_grad=%s)",
-            "global" if global_projection else "per_module",
-            config.grad_project_always,
-            config.add_retain_grad,
+        use_advanced = (
+            method != "pcgrad"
+            or config.cosine_threshold is not None
+            or bool(config.per_layer_threshold)
+            or bool(config.magnitude_preserve)
         )
-        combined, projection_stats = project_forget_gradients(
-            grads_forget=grads_f,
-            grads_retain=grads_r,
-            global_projection=global_projection,
-            always_project=config.grad_project_always,
-            add_retain_grad=config.add_retain_grad,
-            return_stats=True,
-        )
-        projection_stats["applied"] = True
-        logger.info("Built projected gradient matrix for %d modules", len(combined))
+        if use_advanced:
+            logger.info(
+                "Advanced projection: method=%s mode=%s cos_tau=%s per_layer=%s mag_preserve=%s",
+                method,
+                "global" if global_projection else "per_module",
+                config.cosine_threshold,
+                config.per_layer_threshold,
+                config.magnitude_preserve,
+            )
+            combined, projection_stats = project_gradients_advanced(
+                grads_forget=grads_f,
+                grads_retain=grads_r,
+                method=method,
+                cosine_threshold=config.cosine_threshold,
+                per_layer_threshold=bool(config.per_layer_threshold),
+                per_layer_threshold_delta=float(config.per_layer_threshold_delta),
+                cagrad_c=float(config.cagrad_c),
+                gradvac_phi=float(config.gradvac_phi),
+                gradvac_beta=float(config.gradvac_beta),
+                magnitude_preserve=bool(config.magnitude_preserve),
+                nullspace_rank=int(config.nullspace_rank),
+                nullspace_sv_threshold=float(config.nullspace_sv_threshold),
+                always_project=bool(config.grad_project_always),
+                add_retain_grad=bool(config.add_retain_grad),
+                global_projection=global_projection,
+            )
+            logger.info("Built advanced projected gradient matrix for %d modules", len(combined))
+        else:
+            logger.info(
+                "Projecting slice gradients (mode=%s, always_project=%s, add_retain_grad=%s)",
+                "global" if global_projection else "per_module",
+                config.grad_project_always,
+                config.add_retain_grad,
+            )
+            combined, projection_stats = project_forget_gradients(
+                grads_forget=grads_f,
+                grads_retain=grads_r,
+                global_projection=global_projection,
+                always_project=config.grad_project_always,
+                add_retain_grad=config.add_retain_grad,
+                return_stats=True,
+            )
+            projection_stats["applied"] = True
+            logger.info("Built projected gradient matrix for %d modules", len(combined))
     elif config.grad_project and grads_r is None:
         logger.info("grad_project=True but no retain task provided; using forget gradients without projection")
         combined = grads_f
@@ -248,7 +284,10 @@ def compute_slice_inits(
     for name, g in combined.items():
         logger.debug("Building A/B for module %s: G_shape=%s r=%d", name, tuple(g.shape), r_use)
         weight_var = float(target_params[name].detach().float().var().item())
-        ab = build_ab_from_gradient(g, r=r_use, weight_var=weight_var)
+        ab = build_ab_from_gradient(
+            g, r=r_use, weight_var=weight_var,
+            svd_selection=str(config.svd_selection),
+        )
         logger.debug("Built A/B for %s: A_shape=%s B_shape=%s", name, tuple(ab['A'].shape), tuple(ab['B'].shape))
         inits[name] = ab
     return inits, projection_stats
@@ -319,6 +358,17 @@ def load_or_compute_slice_inits(
         "retain_grad_accum": None if is_lora_ga else config.retain_grad_accum,
         "retain_batch_size_set": "all_tasks" if is_lora_ga else config.retain_batch_size_set,
         "single_retain_task_mode": False if is_lora_ga else config.single_retain_task_mode,
+        "projection_method": "pcgrad" if is_lora_ga else str(config.projection_method),
+        "cosine_threshold": None if is_lora_ga else config.cosine_threshold,
+        "per_layer_threshold": False if is_lora_ga else bool(config.per_layer_threshold),
+        "per_layer_threshold_delta": 0.0 if is_lora_ga else float(config.per_layer_threshold_delta),
+        "cagrad_c": 0.0 if is_lora_ga else float(config.cagrad_c),
+        "gradvac_phi": 0.0 if is_lora_ga else float(config.gradvac_phi),
+        "gradvac_beta": 0.0 if is_lora_ga else float(config.gradvac_beta),
+        "magnitude_preserve": False if is_lora_ga else bool(config.magnitude_preserve),
+        "nullspace_rank": 0 if is_lora_ga else int(config.nullspace_rank),
+        "nullspace_sv_threshold": 0.0 if is_lora_ga else float(config.nullspace_sv_threshold),
+        "svd_selection": str(config.svd_selection),
         "lora": lora_payload,
         "model": {
             "class": model.__class__.__name__,

@@ -198,6 +198,17 @@ def train_on_task(
     slice_retain_batch_size_set: str = "all_tasks",
     slice_single_retain_task_mode: bool = False,
     slice_init_method: str = "slice",
+    slice_projection_method: str = "pcgrad",
+    slice_cosine_threshold: float | None = None,
+    slice_per_layer_threshold: bool = False,
+    slice_per_layer_threshold_delta: float = 0.0,
+    slice_cagrad_c: float = 0.5,
+    slice_gradvac_phi: float = 0.0,
+    slice_gradvac_beta: float = 0.5,
+    slice_magnitude_preserve: bool = False,
+    slice_nullspace_rank: int = 8,
+    slice_nullspace_sv_threshold: float = 0.0,
+    slice_svd_selection: str = "lora_ga",
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train a fresh LoRA adapter on one task, then merge it into the model.
 
@@ -236,6 +247,17 @@ def train_on_task(
             retain_batch_size_set=slice_retain_batch_size_set,
             single_retain_task_mode=slice_single_retain_task_mode,
             init_method=slice_init_method,
+            projection_method=slice_projection_method,
+            cosine_threshold=slice_cosine_threshold,
+            per_layer_threshold=slice_per_layer_threshold,
+            per_layer_threshold_delta=slice_per_layer_threshold_delta,
+            cagrad_c=slice_cagrad_c,
+            gradvac_phi=slice_gradvac_phi,
+            gradvac_beta=slice_gradvac_beta,
+            magnitude_preserve=slice_magnitude_preserve,
+            nullspace_rank=slice_nullspace_rank,
+            nullspace_sv_threshold=slice_nullspace_sv_threshold,
+            svd_selection=slice_svd_selection,
         )
         # propagate PEFT lora settings into slice config when available
         try:

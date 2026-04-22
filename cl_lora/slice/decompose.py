@@ -6,20 +6,43 @@ from typing import Dict
 import torch
 
 
-def build_ab_from_gradient(G: torch.Tensor, r: int, weight_var: float) -> Dict[str, torch.Tensor]:
-    """Decompose a gradient matrix into LoRA A/B via low-rank SVD (LoRA-GA style)."""
+def build_ab_from_gradient(
+    G: torch.Tensor,
+    r: int,
+    weight_var: float,
+    svd_selection: str = "lora_ga",
+) -> Dict[str, torch.Tensor]:
+    """Decompose a gradient matrix into LoRA A/B via low-rank SVD.
+
+    svd_selection:
+      - "lora_ga": B=U[:,:r], A=V[r:2r,:]^T (LoRA-GA disjoint slices, BA=0 at init).
+      - "top_r_no_sigma": B=U[:,:r], A=V[:,:r]^T (top-r singular vectors, no
+        sigma weighting — idea C.16 variant without magnitude weighting).
+    """
     device = G.device
     d_out, d_in = G.shape
     G32 = G.float()
-    q = min(4 * r, min(G32.shape))
+    if svd_selection == "lora_ga":
+        q = min(4 * r, min(G32.shape))
+    else:
+        q = min(max(2 * r, r + 2), min(G32.shape))
     if q <= 0:
         raise ValueError("Invalid rank for slice initialization")
 
     U, _, V = torch.svd_lowrank(G32, q=q, niter=4)
 
     Vt = V.t()
-    B = U[:, :r]
-    A = Vt[r : 2 * r, :]
+    if svd_selection == "lora_ga":
+        B = U[:, :r]
+        A = Vt[r : 2 * r, :]
+    elif svd_selection == "top_r_no_sigma":
+        # Use the correct top-r singular vectors but discard singular values,
+        # so BA is a rank-r product of orthonormal factors (not the SVD
+        # reconstruction). The variance-matched rescale below still applies.
+        B = U[:, :r]
+        A = Vt[:r, :]
+    else:
+        raise ValueError(f"Unknown svd_selection: {svd_selection!r}")
 
     # Match LoRAM rescaling: variance-matched scaling using rho/variance_ratio/beta.
     eps = 1e-12

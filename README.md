@@ -256,6 +256,64 @@ Control baseline behavior with environment variables:
 - `SLICE_GRAD_PROJECTION_MODE`: Projection granularity (`global` or `per_module`).
 - `SLICE_MAX_STEPS`: Gradient accumulation steps for initialization.
 
+## Advanced Projection Methods
+
+Beyond plain PCGrad (dot-sign conflict removal), the Slice initialization
+supports several gradient-surgery variants (ideas A.1–A.6 from
+`ideas_for_new_methods.md`). Select one via `--slice-projection-method` plus
+the relevant sub-flags:
+
+| Method                | Flag                                        | Extra flags                                                                 |
+| --------------------- | ------------------------------------------- | --------------------------------------------------------------------------- |
+| `pcgrad` (default)    | —                                           | `--slice-grad-project-always` for OGD-style unconditional removal           |
+| `cagrad`              | `--slice-projection-method cagrad`          | `--slice-cagrad-c <float in [0,1]>` (0 = vanilla, 1 = PCGrad)               |
+| `gradvac`             | `--slice-projection-method gradvac`         | `--slice-gradvac-phi <target_cos>`, `--slice-gradvac-beta <EMA rate>`       |
+| `nullspace`           | `--slice-projection-method nullspace`       | `--slice-nullspace-rank <k>`, `--slice-nullspace-sv-threshold <ratio>`      |
+| `magnitude_preserving`| `--slice-projection-method magnitude_preserving` | rescales PCGrad output to match the original `‖g_f‖`                    |
+
+Orthogonal knobs (stack on top of any method):
+
+- `--slice-cosine-threshold <τ>`: only project when `cos(g_f, g_r) < τ` (replaces the default dot-sign gate).
+- `--slice-per-layer-threshold` / `--slice-per-layer-threshold-delta <δ>`: use `median(cos across modules) − δ` as the threshold.
+- `--slice-magnitude-preserve`: rescale post-projection gradient to preserve `‖g_f‖` per module.
+- `--slice-svd-selection {lora_ga,top_r_no_sigma}`: `lora_ga` (default) uses disjoint slices `B=U[:,:r], A=V[r:2r,:]ᵀ`; `top_r_no_sigma` uses the top-r singular vectors without σ weighting (`B=U[:,:r], A=V[:,:r]ᵀ`).
+
+### Global vs. Per-Module Projection
+
+`--slice-grad-projection-mode {global,per_module}` controls projection granularity.
+
+- **Global** computes one scalar γ from the summed dot products and squared retain-gradient norms across all modules, then applies `g_f_i ← g_f_i + γ · g_r_i` uniformly. It uses the distributive property — no flattened whole-model vector is ever built, so memory stays per-module.
+- **Per-module** decides and applies γ independently for each target matrix.
+
+Compatibility matrix:
+
+| Method / option             | `global` supported? |
+| --------------------------- | :-----------------: |
+| `pcgrad`                    | ✓                   |
+| `cagrad`                    | ✓                   |
+| `magnitude_preserving`      | ✓ (rescale applied per module after the global projection) |
+| `--slice-cosine-threshold`  | ✓ (single global `cos` gate)                              |
+| `nullspace`                 | ✗ — SVD of a 2D retain matrix has no meaningful global analog |
+| `gradvac`                   | ✗ — per-layer φ EMA is the mechanism                        |
+| `--slice-per-layer-threshold` | ✗ — contradictory (threshold is per-layer by definition)  |
+
+Incompatible combinations **raise a `ValueError` at init-time** rather than
+silently running per-module, so run metadata always matches what actually
+executed. `scripts/full_train_projection_variants.sh` therefore forces
+`--slice-grad-projection-mode per_module` for the `nullspace`, `gradvac`,
+and `per_layer_*` tags even when the top-level `SLICE_GRAD_PROJECTION_MODE`
+is `global`.
+
+### Projection Variant Sweep
+
+```bash
+# Train-only sweep over all variants (baselines + A.1–A.6 + C.16):
+GPU=0 RANK=64 RUN_SUFFIX=projvariants bash scripts/full_train_projection_variants.sh
+
+# Eval-only (run on a different machine, same results/ directory):
+GPU=0 RUN_SUFFIX=projvariants bash scripts/full_eval_projection_variants.sh
+```
+
 ## Available Sequences
 
 Defined in cl_lora/task_sequences.py:
