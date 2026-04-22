@@ -11,6 +11,7 @@ plots/
 results/
 slice_cache_diag/
 slice_cache/
+imported_results/
 
 .vscode/
 outputs/
