@@ -287,12 +287,25 @@ def _run_completeness(run: dict) -> int:
 
 def collect_runs(*roots: Path) -> list[dict]:
     best: dict[tuple[str, str], dict] = {}
+
+    def _consider(run: dict) -> None:
+        key = (run["seq_name"], run["method"])
+        if key not in best or _run_completeness(run) > _run_completeness(best[key]):
+            best[key] = run
+
     for root in roots:
         if not root.exists():
             continue
         for seq_dir in sorted(root.iterdir()):
             if not seq_dir.is_dir():
                 continue
+            # Flat layout: seq_dir IS the run directory
+            if (seq_dir / "metrics.json").exists():
+                run = load_run(seq_dir)
+                if run is not None:
+                    _consider(run)
+                continue
+            # Standard 2-level layout: <root>/<seq_name>/<method>/
             for method_dir in sorted(seq_dir.iterdir()):
                 if not method_dir.is_dir():
                     continue
@@ -300,9 +313,8 @@ def collect_runs(*roots: Path) -> list[dict]:
                 if run is None:
                     print(f"  [skip – not finished] {method_dir.relative_to(root)}")
                     continue
-                key = (run["seq_name"], run["method"])
-                if key not in best or _run_completeness(run) > _run_completeness(best[key]):
-                    best[key] = run
+                _consider(run)
+
     return list(best.values())
 
 
@@ -366,30 +378,49 @@ def print_per_sequence_tables(df: pd.DataFrame) -> None:
         sub = grp.droplevel("seq_name").copy()
         sub = sub[metrics].astype(float)
 
-        # Sort by AP descending so best run is at the top
-        if "AP" in sub.columns:
-            sub = sub.sort_values("AP", ascending=False)
+        # Split complete vs incomplete (any None metric = incomplete)
+        complete_mask = sub.notna().all(axis=1)
+        complete   = sub[complete_mask].copy()
+        incomplete = sub[~complete_mask].copy()
 
-        # Shorten method names by stripping common suffix
-        short_names = _strip_common_suffix(list(sub.index))
-        sub.index = short_names
+        # Sort complete by AP descending
+        if "AP" in complete.columns and not complete.empty:
+            complete = complete.sort_values("AP", ascending=False)
+        if "AP" in incomplete.columns and not incomplete.empty:
+            incomplete = incomplete.sort_values("AP", ascending=False)
 
-        # Build display strings, appending * for best value per metric
-        display = sub.copy().astype(object)
+        all_rows = pd.concat([complete, incomplete])
+        short_names = _strip_common_suffix(list(all_rows.index))
+        name_map = dict(zip(all_rows.index, short_names))
+
+        # Build display strings — stars only from complete runs
+        display = all_rows.copy().astype(object)
         for col in metrics:
-            col_vals = sub[col].dropna()
-            if col_vals.empty:
-                continue
-            best = col_vals.max() if col in higher_is_better else col_vals.min()
-            for idx in sub.index:
-                v = sub.loc[idx, col]
-                s = f"{v:.4f}" if pd.notna(v) else "None"
-                display.loc[idx, col] = s + ("*" if pd.notna(v) and v == best else " ")
+            col_vals = complete[col].dropna() if not complete.empty else pd.Series(dtype=float)
+            best = col_vals.max() if col in higher_is_better else (col_vals.min() if not col_vals.empty else None)
+            for idx in all_rows.index:
+                v = all_rows.loc[idx, col]
+                if pd.isna(v):
+                    display.loc[idx, col] = "  --  "
+                else:
+                    is_best = best is not None and v == best and idx in complete.index
+                    display.loc[idx, col] = f"{v:.4f}" + ("*" if is_best else " ")
 
-        sep = "=" * (max(len(n) for n in sub.index) + len(metrics) * 9 + 4)
+        display.index = [name_map[i] for i in all_rows.index]
+
+        # Mark incomplete rows with a trailing label
+        if not incomplete.empty:
+            incomplete_short = {name_map[i] for i in incomplete.index}
+            new_index = [
+                f"{n}  [incomplete]" if n in incomplete_short else n
+                for n in display.index
+            ]
+            display.index = new_index
+
+        sep = "=" * (max(len(n) for n in display.index) + len(metrics) * 9 + 4)
         print(f"\n{sep}")
         print(f"  {seq}")
-        print(f"  (* = best per metric | AP FP GP IP: higher is better | Forget: lower is better)")
+        print(f"  (* = best per metric, complete runs only | AP FP GP IP: higher is better | Forget: lower is better)")
         print(sep)
         print(display.to_string())
         print(sep)
