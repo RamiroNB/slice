@@ -43,9 +43,13 @@ import numpy as np
 # SSH aliases as defined in ~/.ssh/config — no host/user needed here.
 REMOTES = ["cristian", "rafa"]
 
-REMOTE_BASE = "~/work/cl-lora/adaptors_eval"
-LOCAL_BASE  = Path("imported_results")
-SYNC_FILES  = ["metrics.json", "results_matrix.json", "run_config.json", "run_summary.json"]
+REMOTE_BASE        = "~/work/cl-lora/adaptors_eval"
+LOCAL_BASE         = Path("imported_results")
+MOTOX_RESULTS      = Path("/mnt/E-SSD/dev-cl-lora/cl-lora/results")
+PENDING_EVAL_REMOTES = ["cristian", "rafa"]   # machines running pending_eval
+PENDING_EVAL_PATH    = "~/work/cl-lora/pending_eval"
+PENDING_EVAL_LOCAL   = Path("imported_results_pending")
+SYNC_FILES           = ["metrics.json", "results_matrix.json", "run_config.json", "run_summary.json"]
 
 METRICS = ["AP", "FP", "GP", "IP", "Forget"]
 
@@ -179,27 +183,65 @@ def rsync_run(alias: str, seq_name: str, method: str, verbose: bool = False) -> 
     return True
 
 
+def _sync_normal_eval(alias: str, verbose: bool = False) -> None:
+    """Sync finished runs from adaptors_eval/ on alias. ControlMaster must already be open."""
+    print(f"  [normal eval] looking for finished runs in {REMOTE_BASE} ...")
+    runs = list_finished_runs(alias, verbose=verbose)
+    if not runs:
+        print("  No finished runs found.")
+        return
+    print(f"  Found {len(runs)} finished run(s): {[f'{s}/{m}' for s, m in runs]}")
+    for seq_name, method in sorted(runs):
+        local_metrics = LOCAL_BASE / seq_name / method / "metrics.json"
+        if local_metrics.exists():
+            print(f"  [already synced] {seq_name}/{method}")
+            continue
+        print(f"\n  Syncing {seq_name}/{method} ...")
+        rsync_run(alias, seq_name, method, verbose=verbose)
+
+
+def _sync_pending_eval(alias: str, verbose: bool = False) -> None:
+    """Sync pending_eval result JSONs from alias. ControlMaster must already be open."""
+    print(f"  [pending eval] syncing result JSONs from {PENDING_EVAL_PATH} ...")
+    PENDING_EVAL_LOCAL.mkdir(parents=True, exist_ok=True)
+    ctrl = _ctrl_socket(alias)
+    ssh_opt = (
+        f"ssh -o StrictHostKeyChecking=no"
+        f" -o ControlPath={ctrl} -o ControlMaster=no"
+        + (" -v" if verbose else "")
+    )
+    include_args = []
+    for f in SYNC_FILES:
+        include_args += ["--include", f]
+    cmd = [
+        "rsync", "-az",
+        "--include", "*/",
+        *include_args,
+        "--exclude", "*",
+        "-e", ssh_opt,
+        f"{alias}:{PENDING_EVAL_PATH}/",
+        str(PENDING_EVAL_LOCAL) + "/",
+    ]
+    print(f"  $ {' '.join(cmd)}")
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print(f"  [error] rsync exited with code {result.returncode}")
+    else:
+        print(f"  Done → {PENDING_EVAL_LOCAL}/")
+
+
 def sync_all(verbose: bool = False) -> None:
     print("\n=== Syncing from remote machines ===")
-    for alias in REMOTES:
-        print(f"\n[{alias}]")
-        print(f"  Opening connection to {alias} (you will be prompted for the sparta password) ...")
+    all_aliases = sorted(set(REMOTES) | set(PENDING_EVAL_REMOTES))
+    for alias in all_aliases:
+        print(f"\n[{alias}] opening connection (you will be prompted for the sparta password) ...")
         if not open_control_master(alias, verbose=verbose):
             continue
         try:
-            print(f"  Looking for finished runs ...")
-            runs = list_finished_runs(alias, verbose=verbose)
-            if not runs:
-                print("  No finished runs found.")
-                continue
-            print(f"  Found {len(runs)} finished run(s): {[f'{s}/{m}' for s, m in runs]}")
-            for seq_name, method in sorted(runs):
-                local_metrics = LOCAL_BASE / seq_name / method / "metrics.json"
-                if local_metrics.exists():
-                    print(f"  [already synced] {seq_name}/{method}")
-                    continue
-                print(f"\n  Syncing {seq_name}/{method} ...")
-                rsync_run(alias, seq_name, method, verbose=verbose)
+            if alias in REMOTES:
+                _sync_normal_eval(alias, verbose=verbose)
+            if alias in PENDING_EVAL_REMOTES:
+                _sync_pending_eval(alias, verbose=verbose)
         finally:
             close_control_master(alias)
 
@@ -230,7 +272,7 @@ def load_run(run_dir: Path) -> dict | None:
             matrix = json.load(f)
 
     return {
-        "seq_name": run_dir.parent.name,
+        "seq_name": config.get("sequence") or run_dir.parent.name,
         "method": run_dir.name,
         "metrics": metrics,
         "config": config,
@@ -238,8 +280,13 @@ def load_run(run_dir: Path) -> dict | None:
     }
 
 
+def _run_completeness(run: dict) -> int:
+    """Count non-None metric values — higher is more complete."""
+    return sum(1 for m in METRICS if run["metrics"].get(m) is not None)
+
+
 def collect_runs(*roots: Path) -> list[dict]:
-    runs = []
+    best: dict[tuple[str, str], dict] = {}
     for root in roots:
         if not root.exists():
             continue
@@ -250,11 +297,13 @@ def collect_runs(*roots: Path) -> list[dict]:
                 if not method_dir.is_dir():
                     continue
                 run = load_run(method_dir)
-                if run is not None:
-                    runs.append(run)
-                else:
+                if run is None:
                     print(f"  [skip – not finished] {method_dir.relative_to(root)}")
-    return runs
+                    continue
+                key = (run["seq_name"], run["method"])
+                if key not in best or _run_completeness(run) > _run_completeness(best[key]):
+                    best[key] = run
+    return list(best.values())
 
 
 # ---------------------------------------------------------------------------
@@ -413,8 +462,9 @@ def parse_args():
                    help="SSH into remote machines and rsync finished runs first")
     p.add_argument("--no-analyse", action="store_true",
                    help="Skip analysis (useful with --sync to only fetch data)")
-    p.add_argument("--roots", nargs="+", default=["imported_results"],
-                   help="Local folders to scan for results (default: imported_results results)")
+    p.add_argument("--roots", nargs="+",
+                   default=["imported_results", str(PENDING_EVAL_LOCAL), str(MOTOX_RESULTS)],
+                   help="Local folders to scan for results")
     p.add_argument("--seq", nargs="+", default=None,
                    help="Filter to specific sequence names")
     p.add_argument("--method", nargs="+", default=None,
