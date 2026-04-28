@@ -7,15 +7,15 @@ set -euo pipefail
 # CL meth.: vanilla, o_lora, inflora, sapt
 # Total   : 4 × 4 = 16 runs per sequence.
 #
-# Defaults run NI-Seq-Dummy (2 stages) with tiny eval budgets so each run
-# finishes in a few minutes; override env vars to point at a real sequence
-# or pump up budgets. Any extra positional args are forwarded to orchestrator
-# (so you can pass --resume, --train-only, etc).
+# Train-only phase: this script runs --train-only (no evaluation). Evals
+# are run on a separate machine afterwards from the persisted artifacts.
+# Defaults target NI-Seq-G2 (2 stages); override env vars to point at a
+# real sequence. Any extra positional args are forwarded to orchestrator
+# (so you can pass --resume, etc).
 #
 # Usage:
 #   bash scripts/test_init_x_cl_methods.sh
-#   GPU=0 SEQUENCES="NI-Seq-Dummy" RUN_SUFFIX=smoke01 bash scripts/test_init_x_cl_methods.sh
-#   bash scripts/test_init_x_cl_methods.sh --train-only
+#   GPU=0 SEQUENCES="NI-Seq-G2" RUN_SUFFIX=smoke01 bash scripts/test_init_x_cl_methods.sh
 #   ONLY_INITS="slice lora_ga" ONLY_CL="sapt" bash scripts/test_init_x_cl_methods.sh
 #   FAIL_FAST=0 bash scripts/test_init_x_cl_methods.sh   # collect failures, do not stop
 
@@ -25,14 +25,11 @@ RUN_PREFIX="${RUN_PREFIX:-compose}"
 RUN_SUFFIX="${RUN_SUFFIX:-smoke}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-SEQUENCES_RAW="${SEQUENCES:-NI-Seq-Dummy}"
+SEQUENCES_RAW="${SEQUENCES:-NI-Seq-G2}"
 read -r -a SEQUENCES <<< "${SEQUENCES_RAW}"
 
-# Tiny defaults for a smoke pass. Override at will.
-EVAL_SIZE="${EVAL_SIZE:-10}"
-TASK_EVAL_SAMPLES="${TASK_EVAL_SAMPLES:-5}"
-TASK_EVAL_MAX_NEW_TOKENS="${TASK_EVAL_MAX_NEW_TOKENS:-32}"
-GENERAL_EVAL_SET="${GENERAL_EVAL_SET:-core}"
+# Train-only phase: eval budgets are intentionally omitted (evals run later
+# on a different machine). Slice cache dir/steps still apply to init.
 SLICE_CACHE_DIR="${SLICE_CACHE_DIR:-slice_cache}"
 SLICE_MAX_STEPS="${SLICE_MAX_STEPS:-8}"
 
@@ -73,7 +70,7 @@ init_flags() {
 # Per-cl-method flag bundles.
 cl_flags() {
 	case "$1" in
-		vanilla) printf '%s\n' "--cl-method vanilla" ;;
+		# vanilla) printf '%s\n' "--cl-method vanilla" ;;
 		o_lora)  printf '%s\n' "--cl-method o_lora --cl-o-lora-lambda ${O_LORA_LAMBDA}" ;;
 		inflora) printf '%s\n' "--cl-method inflora --cl-inflora-nullspace-rank ${INFLORA_NULLSPACE_RANK} --cl-inflora-max-cov-batches ${INFLORA_MAX_COV_BATCHES} --cl-inflora-cov-batch-size ${INFLORA_COV_BATCH_SIZE}" ;;
 		sapt)    printf '%s\n' "--cl-method sapt --cl-sapt-key-dim ${SAPT_KEY_DIM} --cl-sapt-arm-n-samples ${SAPT_ARM_N_SAMPLES} --cl-sapt-arm-max-new-tokens ${SAPT_ARM_MAX_NEW_TOKENS} --cl-sapt-arm-n-epochs ${SAPT_ARM_N_EPOCHS} --cl-sapt-arm-batch-size ${SAPT_ARM_BATCH_SIZE} --cl-sapt-arm-learning-rate ${SAPT_ARM_LR} --cl-sapt-seed-prompts-per-task ${SAPT_SEED_PROMPTS_PER_TASK}" ;;
@@ -92,7 +89,7 @@ filter_match() {
 }
 
 INITS=(lora_vanilla loram lora_ga slice)
-CL_METHODS=(vanilla o_lora inflora sapt)
+CL_METHODS=(o_lora inflora sapt)
 
 run_combo() {
 	local sequence_name="$1"
@@ -128,10 +125,7 @@ run_combo() {
 			--sequence "${sequence_name}" \
 			--run-name "${run_name}" \
 			--rank "${RANK}" \
-			--general-eval-set "${GENERAL_EVAL_SET}" \
-			--eval-size "${EVAL_SIZE}" \
-			--task-eval-samples "${TASK_EVAL_SAMPLES}" \
-			--task-eval-max-new-tokens "${TASK_EVAL_MAX_NEW_TOKENS}" \
+			--train-only \
 			--log-level "${LOG_LEVEL}" \
 			"${init_arr[@]}" \
 			"${cl_arr[@]}" \
