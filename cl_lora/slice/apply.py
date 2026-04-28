@@ -15,8 +15,17 @@ def apply_slice_inits(
     lora_alpha: float = 2.0,
     r: Optional[int] = None,
     decomposition: Optional[str] = None,
+    skip_absorption: Optional[bool] = None,
+    adapter_name: str = "default",
 ) -> int:
-    """Apply slice inits to a PEFT LoRA model with in-place absorption."""
+    """Apply slice inits to a PEFT LoRA model with in-place absorption.
+
+    `skip_absorption` (when not None) overrides the decomposition-based
+    default. SAPT sets it to True so the base weights stay pristine across
+    parallel adapters. `adapter_name` selects which named LoRA adapter on
+    each module receives the init (default `"default"`; SAPT uses
+    `"task_NN"` per-stage names).
+    """
     from peft.tuners.lora import Linear as LoraLinear
 
     def _tensor_mean_var(t: torch.Tensor) -> tuple[float, float]:
@@ -46,11 +55,14 @@ def apply_slice_inits(
             return candidates[0]
         return None
 
-    skip_absorption = decomposition in {
-        "right_singular_vectors",
-        "right_singular_vectors_kaiming",
-        "right_svd_kaiming_random_basis",
-    }
+    if skip_absorption is None:
+        skip_absorption = decomposition in {
+            "right_singular_vectors",
+            "right_singular_vectors_kaiming",
+            "right_svd_kaiming_random_basis",
+        }
+    else:
+        skip_absorption = bool(skip_absorption)
 
     if r is None or int(r) <= 0:
         raise RuntimeError("slice apply requires a valid LoRA rank `r` for absorption.")
@@ -83,8 +95,15 @@ def apply_slice_inits(
 
         logger.debug("slice map: init_key=%s -> peft_module=%s", init_key, target_name)
         module = named_modules[target_name]
-        A_tgt = module.lora_A["default"].weight
-        B_tgt = module.lora_B["default"].weight
+        if adapter_name not in getattr(module, "lora_A", {}):
+            logger.warning(
+                "Adapter %r not present on LoRA module %s (have %s); skipping",
+                adapter_name, init_key, list(getattr(module, "lora_A", {}).keys()),
+            )
+            num_skipped += 1
+            continue
+        A_tgt = module.lora_A[adapter_name].weight
+        B_tgt = module.lora_B[adapter_name].weight
 
         if A_tgt.shape != ab["A"].shape or B_tgt.shape != ab["B"].shape:
             raise RuntimeError(
@@ -130,7 +149,7 @@ def apply_slice_inits(
                         f"(got {type(base_weight)}). Cannot perform absorption."
                     )
 
-                scaling_val = float(module.scaling["default"])
+                scaling_val = float(module.scaling[adapter_name])
                 orig_dtype = base_weight.dtype
 
                 weight_orig32 = base_weight.data.to(torch.float32).clone()

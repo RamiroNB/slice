@@ -27,13 +27,21 @@ try:
     from .metrics import compute_cl_metrics
     from .repro import set_global_seed
     from .task_sequences import get_sequence
-    from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, load_model_with_adapters
+    from .train import (
+        HF_TOKEN, MODEL_NAME,
+        build_tokenizer, load_base_model,
+        load_model_with_adapters, load_sapt_model,
+    )
 except ImportError:
     from eval import evaluate_all
     from metrics import compute_cl_metrics
     from repro import set_global_seed
     from task_sequences import get_sequence
-    from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, load_model_with_adapters
+    from train import (  # type: ignore[no-redef]
+        HF_TOKEN, MODEL_NAME,
+        build_tokenizer, load_base_model,
+        load_model_with_adapters, load_sapt_model,
+    )
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -141,9 +149,27 @@ def run_eval_from_manifest(
             resolved_adapter_paths.append(abs_ap)
 
         print(f"Loading base model from: {abs_base}")
-        print(f"Merging {len(resolved_adapter_paths)} adapter(s): {resolved_adapter_paths}")
         tokenizer = build_tokenizer(model_name=abs_base, hf_token=HF_TOKEN)
-        model = load_model_with_adapters(abs_base, resolved_adapter_paths)
+
+        # SAPT eval path: load every adapter as a parallel named adapter and
+        # wrap with SAPTWrapper so generation routes through the attention
+        # router. Selected when the manifest declares cl_method=sapt and a
+        # router checkpoint is present; otherwise fall back to the
+        # sequential-merge reconstruction.
+        manifest_cl_method = str(manifest.get("cl_method", "vanilla")).lower()
+        sapt_router_path = manifest.get("sapt_router_path")
+        if manifest_cl_method == "sapt" and sapt_router_path:
+            sapt_router_abs = str(Path(sapt_router_path).resolve())
+            if not Path(sapt_router_abs).is_file():
+                raise FileNotFoundError(
+                    f"SAPT router checkpoint not found at '{sapt_router_abs}'. "
+                    "Ensure cl_state/sapt/router.pt was transferred."
+                )
+            print(f"SAPT eval: loading {len(resolved_adapter_paths)} parallel adapter(s) + router {sapt_router_abs}")
+            model = load_sapt_model(abs_base, resolved_adapter_paths, sapt_router_abs)
+        else:
+            print(f"Merging {len(resolved_adapter_paths)} adapter(s): {resolved_adapter_paths}")
+            model = load_model_with_adapters(abs_base, resolved_adapter_paths)
     else:
         # Legacy format: single merged-model checkpoint.
         resolved_model_path: str = _get("model_path", model_path)
