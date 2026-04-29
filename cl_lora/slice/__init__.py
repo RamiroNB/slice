@@ -15,7 +15,7 @@ def initialize_lora_with_slice(
     adapter_name: str = "default",
 ) -> int:
     set_global_seed(int(config.seed))
-    inits = load_or_compute_slice_inits(
+    inits, _cache_root = load_or_compute_slice_inits(
         model=model,
         tokenizer=tokenizer,
         forget_task=forget_task,
