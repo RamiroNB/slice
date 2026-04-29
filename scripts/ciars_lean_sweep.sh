@@ -30,7 +30,7 @@ echo "Starting the execution"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TOKENIZERS_PARALLELISM="false"
 
-REPO_ROOT="${REPO_ROOT:-/home/joanapasquali/cl-baselines/cl-lora}"
+REPO_ROOT="${REPO_ROOT:-/home/joanapasquali/cl-lora}"
 CONDA_ENV="${CONDA_ENV:-cl_lora}"
 
 cd "${REPO_ROOT}"
