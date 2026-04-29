@@ -48,3 +48,8 @@ class SliceInitConfig:
     # SVD selection rule (idea C.16 variant): "lora_ga" (default LoRA-GA disjoint slices)
     # or "top_r_no_sigma" (B=U[:,:r], A=V[:,:r]^T without singular-value weighting).
     svd_selection: str = "lora_ga"
+    # Skip in-place absorption of `B_init A_init * scaling` into the frozen
+    # base weights. Required by SAPT (parallel adapters share one base, so
+    # multiple absorptions would compound). When True, init_correction.pt is
+    # not written and load_model_with_adapters does not need to replay it.
+    skip_absorption: bool = False

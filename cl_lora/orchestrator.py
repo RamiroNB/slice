@@ -15,17 +15,31 @@ except Exception:  # pragma: no cover
     import importlib_metadata  # type: ignore
 
 try:
+    from .cl_methods import REGISTRY as CL_METHOD_REGISTRY, build_cl_method
+    from .cl_methods.sapt import SAPTMethod
     from .eval import evaluate_all
     from .metrics import compute_cl_metrics
     from .repro import set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
-    from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, load_model_with_adapters, train_on_task
+    from .train import (
+        HF_TOKEN, MODEL_NAME,
+        build_tokenizer, load_base_model,
+        load_model_with_adapters, load_sapt_model,
+        train_on_task,
+    )
 except ImportError:
+    from cl_methods import REGISTRY as CL_METHOD_REGISTRY, build_cl_method  # type: ignore[no-redef]
+    from cl_methods.sapt import SAPTMethod  # type: ignore[no-redef]
     from eval import evaluate_all
     from metrics import compute_cl_metrics
     from repro import set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
-    from train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model, load_model_with_adapters, train_on_task
+    from train import (  # type: ignore[no-redef]
+        HF_TOKEN, MODEL_NAME,
+        build_tokenizer, load_base_model,
+        load_model_with_adapters, load_sapt_model,
+        train_on_task,
+    )
 
 
 def _collect_fn_defaults(fn) -> Dict[str, Any]:
@@ -168,6 +182,8 @@ def run_sequence(
     general_eval_strategy: str = "every_stage",
     seen_eval_strategy: str = "full_matrix",
     train_only: bool = False,
+    cl_method_name: str = "vanilla",
+    cl_method_kwargs: Dict[str, Any] | None = None,
     orchestrator_config: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
@@ -204,6 +220,8 @@ def run_sequence(
         "keep_all_checkpoints": keep_all_checkpoints,
         "general_eval_strategy": general_eval_strategy,
         "seen_eval_strategy": seen_eval_strategy,
+        "cl_method": str(cl_method_name),
+        "cl_method_kwargs": dict(cl_method_kwargs or {}),
     }
 
     run_cfg_payload: Dict[str, Any] = {
@@ -274,7 +292,23 @@ def run_sequence(
                 if not Path(ap).exists():
                     raise FileNotFoundError(f"Resume failed: missing adapter checkpoint at {ap}.")
             tokenizer = build_tokenizer(model_name=str(base_model_ckpt), hf_token=HF_TOKEN)
-            model = load_model_with_adapters(str(base_model_ckpt), adapter_paths_resume)
+            if str(cl_method_name).lower() == "sapt":
+                # SAPT keeps adapters parallel — load every prior adapter as a
+                # named adapter without merging. The router (if previously
+                # trained) is loaded later via cl_method.load(state_dir).
+                from peft import PeftModel
+
+                base = load_base_model(model_name=str(base_model_ckpt), hf_token=HF_TOKEN)
+                peft_model = None
+                for i, ap in enumerate(adapter_paths_resume):
+                    name = SAPTMethod.adapter_name_for_stage(i + 1)
+                    if peft_model is None:
+                        peft_model = PeftModel.from_pretrained(base, ap, adapter_name=name)
+                    else:
+                        peft_model.load_adapter(ap, adapter_name=name)
+                model = peft_model
+            else:
+                model = load_model_with_adapters(str(base_model_ckpt), adapter_paths_resume)
         else:
             tokenizer = build_tokenizer(model_name=model_name, hf_token=HF_TOKEN)
             model = load_base_model(model_name=model_name, hf_token=HF_TOKEN)
@@ -300,6 +334,17 @@ def run_sequence(
             f"Resuming at stage {start_stage} but base model checkpoint not found at {base_model_ckpt}."
         )
 
+    # Build the CL method object once per run. Persistent state (O-LoRA A
+    # snapshots, InfLoRA covariance) lives under <run>/cl_state/ and is
+    # reloaded on resume so the per-stage history carries across runs.
+    cl_state_dir = run_output_dir / "cl_state"
+    cl_state_dir.mkdir(parents=True, exist_ok=True)
+    cl_method = build_cl_method(cl_method_name, **(cl_method_kwargs or {}))
+    if start_stage > 1:
+        cl_method.load(str(cl_state_dir))
+    sapt_active = bool(getattr(cl_method, "requires_no_merge", False))
+    print(f"CL method: {cl_method.name} | state dir: {cl_state_dir} | no_merge={sapt_active}")
+
     for idx in range(start_stage, len(sequence.tasks) + 1):
         task = sequence.tasks[idx - 1]
         task_name = task.name
@@ -320,6 +365,8 @@ def run_sequence(
             slice_cache_context = f"adapter:{prev_adapter_dir}"
 
         adapter_checkpoint_dir = checkpoint_root / f"stage_{idx:02d}_{safe_task_name}" / "adapter"
+
+        sapt_adapter_name = SAPTMethod.adapter_name_for_stage(idx) if sapt_active else None
 
         model, train_report = train_on_task(
             model=model,
@@ -356,8 +403,28 @@ def run_sequence(
             slice_nullspace_rank=slice_nullspace_rank,
             slice_nullspace_sv_threshold=slice_nullspace_sv_threshold,
             slice_svd_selection=slice_svd_selection,
+            cl_method=cl_method,
+            stage_idx=idx,
+            sapt_mode=sapt_active,
+            sapt_adapter_name=sapt_adapter_name,
         )
+
+        # SAPT post-stage: train (or grow + retrain) the shared-attention router
+        # on pseudo-samples generated by every loaded adapter. Must run BEFORE
+        # cl_method.save() so the router state is included in the persisted
+        # cl_state/sapt/sapt_state.pt.
+        if sapt_active and hasattr(cl_method, "run_arm"):
+            try:
+                arm_stats = cl_method.run_arm(model, tokenizer)
+                print(f"  SAPT ARM stats: {arm_stats}")
+            except Exception as exc:
+                logging.getLogger("cl_lora.orchestrator.sapt").warning(
+                    "ARM training failed at stage %d: %s", idx, exc,
+                )
+
+        cl_method.save(str(cl_state_dir))
         print(f"  Adapter checkpoint saved: {adapter_checkpoint_dir}")
+        print(f"  CL-method state saved: {cl_state_dir} | {cl_method.metadata()}")
 
         seen_tasks.append(task)
 
@@ -385,6 +452,12 @@ def run_sequence(
         # Write a manifest that a standalone eval pass can consume without
         # needing to re-run training.
         stage_eval_dir.mkdir(parents=True, exist_ok=True)
+        sapt_router_path: str | None = None
+        if sapt_active:
+            router_file = cl_state_dir / "sapt" / "router.pt"
+            if router_file.exists():
+                sapt_router_path = str(router_file.resolve())
+
         _write_json(
             stage_eval_dir / "eval_manifest.json",
             {
@@ -403,6 +476,8 @@ def run_sequence(
                 "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
                 "seed": int(seed),
                 "train_output_dir": str(stage_train_dir),
+                "cl_method": cl_method.name,
+                "sapt_router_path": sapt_router_path,
             },
         )
 
@@ -416,8 +491,26 @@ def run_sequence(
                 "general": {"gp": {}, "ip": {}, "gp_mean": None, "ip_mean": None, "mode": "skipped"},
             }
         else:
+            # SAPT: wrap the in-memory un-merged peft model in SAPTWrapper so
+            # forward / generate pass through the shared-attention router.
+            if sapt_active:
+                from .sapt import SAPTRouter, SAPTWrapper
+
+                router_packed = cl_method.get_router_packed()  # type: ignore[attr-defined]
+                if router_packed is None:
+                    print("  WARNING: SAPT eval requested but no router available; falling back to bare model.")
+                    eval_model = model
+                else:
+                    router = SAPTRouter.from_packed(router_packed)
+                    eval_model = SAPTWrapper(
+                        model, router.to(next(model.parameters()).device),
+                        cl_method.all_adapter_names(),  # type: ignore[attr-defined]
+                    )
+            else:
+                eval_model = model
+
             evaluation = evaluate_all(
-                model=model,
+                model=eval_model,
                 tokenizer=tokenizer,
                 seen_tasks=eval_seen,
                 output_dir=str(stage_eval_dir),
@@ -584,6 +677,40 @@ def main() -> None:
         default="slice",
         help="Initialization method: 'slice' (default), 'lora_ga' (SVD on forget gradients only), "
              "or 'loram' (DST-based, no gradients).")
+    parser.add_argument("--cl-method",
+        choices=sorted(CL_METHOD_REGISTRY.keys()),
+        default="vanilla",
+        help="Continual-learning training method (composes with any LoRA init). "
+             "'vanilla' (default) is the existing per-stage train+merge pipeline. "
+             "'o_lora' adds an orthogonality regularizer between current and prior "
+             "task A matrices. 'inflora' projects the new task's A onto the null "
+             "space of past-task input feature covariance.")
+    parser.add_argument("--cl-o-lora-lambda", type=float, default=0.5,
+        help="O-LoRA orthogonality regularizer weight. Used only when --cl-method=o_lora.")
+    parser.add_argument("--cl-inflora-nullspace-rank", type=int, default=64,
+        help="Top-k subspace size of past-task input covariance to project A out of. "
+             "Used only when --cl-method=inflora.")
+    parser.add_argument("--cl-inflora-max-cov-batches", type=int, default=32,
+        help="Max forward batches per stage to estimate input covariance. "
+             "Used only when --cl-method=inflora.")
+    parser.add_argument("--cl-inflora-cov-batch-size", type=int, default=8,
+        help="Batch size used during InfLoRA covariance estimation forward passes.")
+    parser.add_argument("--cl-sapt-key-dim", type=int, default=64,
+        help="SAPT router key/query dimensionality.")
+    parser.add_argument("--cl-sapt-arm-n-samples", type=int, default=64,
+        help="Pseudo-samples per task generated during ARM router training.")
+    parser.add_argument("--cl-sapt-arm-max-new-tokens", type=int, default=32,
+        help="Max new tokens per pseudo-sample during ARM generation.")
+    parser.add_argument("--cl-sapt-arm-max-input-length", type=int, default=128,
+        help="Max input length when tokenizing seed prompts for ARM generation.")
+    parser.add_argument("--cl-sapt-arm-n-epochs", type=int, default=3,
+        help="Router training epochs over the ARM pseudo-sample pool.")
+    parser.add_argument("--cl-sapt-arm-batch-size", type=int, default=4,
+        help="Batch size for router optimization steps.")
+    parser.add_argument("--cl-sapt-arm-learning-rate", type=float, default=1e-3,
+        help="Router AdamW learning rate.")
+    parser.add_argument("--cl-sapt-seed-prompts-per-task", type=int, default=32,
+        help="How many training prompts to cache per task for ARM seeding.")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
         help="Keep all intermediate stage checkpoints. By default only the latest is kept.")
     parser.add_argument("--general-eval-strategy", choices=["every_stage", "final_only"],
@@ -690,6 +817,24 @@ def main() -> None:
         general_eval_strategy=args.general_eval_strategy,
         seen_eval_strategy=args.seen_eval_strategy,
         train_only=args.train_only,
+        cl_method_name=args.cl_method,
+        cl_method_kwargs={
+            "lambda_orth": args.cl_o_lora_lambda,
+            "nullspace_rank": args.cl_inflora_nullspace_rank,
+            "max_cov_batches": args.cl_inflora_max_cov_batches,
+            "cov_batch_size": args.cl_inflora_cov_batch_size,
+            "max_seq_length": 256,
+            "seed": args.seed,
+            # SAPT-specific (filtered out by build_cl_method when not applicable):
+            "key_dim": args.cl_sapt_key_dim,
+            "arm_n_samples_per_task": args.cl_sapt_arm_n_samples,
+            "arm_max_new_tokens": args.cl_sapt_arm_max_new_tokens,
+            "arm_max_input_length": args.cl_sapt_arm_max_input_length,
+            "arm_n_epochs": args.cl_sapt_arm_n_epochs,
+            "arm_batch_size": args.cl_sapt_arm_batch_size,
+            "arm_learning_rate": args.cl_sapt_arm_learning_rate,
+            "seed_prompts_per_task": args.cl_sapt_seed_prompts_per_task,
+        },
         orchestrator_config=orchestrator_config,
     )
 
