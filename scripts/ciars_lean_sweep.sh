@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=cl_lora_lean
-#SBATCH --output=/home/joaoabitante/Sout/%j%x.out
-#SBATCH --error=/home/joaoabitante/Sout/%j%x.out
+#SBATCH --output=/home/joanapasquali/Sout/%j%x.out
+#SBATCH --error=/home/joanapasquali/Sout/%j%x.out
 
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
@@ -30,7 +30,7 @@ echo "Starting the execution"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TOKENIZERS_PARALLELISM="false"
 
-REPO_ROOT="${REPO_ROOT:-/home/joaoabitante/cl-baselines/cl-lora}"
+REPO_ROOT="${REPO_ROOT:-/home/joanapasquali/cl-baselines/cl-lora}"
 CONDA_ENV="${CONDA_ENV:-cl_lora}"
 
 cd "${REPO_ROOT}"
