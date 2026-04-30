@@ -317,6 +317,8 @@ def main() -> None:
         help="Path to the run output directory (contains stages/ sub-directory).",
     )
     run_p.add_argument("--skip-general-eval", action="store_true", default=None)
+    run_p.add_argument("--general-eval-all-stages", action="store_true", default=False,
+                       help="Run benchmark eval (GP/IP) at every stage, not just the final one.")
     run_p.add_argument("--quick-eval", action="store_true", default=None)
     run_p.add_argument("--eval-size", type=int, default=None)
     run_p.add_argument("--task-eval-samples", type=int, default=None)
@@ -377,14 +379,22 @@ def main() -> None:
         skip_general = True if args.skip_general_eval else None
         quick = True if args.quick_eval else None
 
+        valid_stage_dirs = [sd for sd in stage_dirs if (sd / "eval_manifest.json").exists()]
+        final_stage = valid_stage_dirs[-1] if valid_stage_dirs else None
+        final_only = not args.general_eval_all_stages
+
         for sd in stage_dirs:
             if not (sd / "eval_manifest.json").exists():
                 print(f"Skipping {sd} (no eval_manifest.json)")
                 continue
-            print(f"\n=== Evaluating {sd.name} ===")
+            is_final = sd == final_stage
+            skip_general_this_stage = skip_general
+            if final_only and not is_final:
+                skip_general_this_stage = True
+            print(f"\n=== Evaluating {sd.name}{' (benchmarks skipped)' if skip_general_this_stage else ''} ===")
             run_eval_from_manifest(
                 stage_dir=sd,
-                skip_general_eval=skip_general,
+                skip_general_eval=skip_general_this_stage,
                 quick_eval=quick,
                 eval_size=args.eval_size,
                 task_eval_samples=args.task_eval_samples,

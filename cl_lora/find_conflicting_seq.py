@@ -210,6 +210,19 @@ DIVERSE_SEARCH_POOL: List[SuperNITask] = [
 ]
 
 
+_N_ORIG_TOTAL      = 26                            # tasks in task_sequences.py
+_N_ORIG_IN_POOL    = 11                            # of those 26, included in DIVERSE_SEARCH_POOL
+_N_DIVERSE_POOL    = len(DIVERSE_SEARCH_POOL)      # 46: 11 original + 35 new
+_N_DIVERSE_ADDED   = _N_DIVERSE_POOL - _N_ORIG_IN_POOL  # 35 new diverse tasks
+print(
+    f"\nTask pools:"
+    f"\n  --pool all     : {_N_ORIG_TOTAL} original tasks (from task_sequences.py)"
+    f"\n  --pool diverse : {_N_DIVERSE_POOL} tasks "
+    f"({_N_ORIG_IN_POOL} original + {_N_DIVERSE_ADDED} diverse additions)"
+    f"\n  Possible ordered sequences  (--pool diverse): {_N_DIVERSE_POOL * (_N_DIVERSE_POOL - 1)}"
+    f"\n  Possible unordered pairs    (--pool diverse): {_N_DIVERSE_POOL * (_N_DIVERSE_POOL - 1) // 2}\n"
+)
+
 # ---------------------------------------------------------------------------
 # Gradient conflict measurement
 # ---------------------------------------------------------------------------

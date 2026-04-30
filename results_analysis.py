@@ -304,6 +304,23 @@ def _load_benchmark_scores(run_dir: Path) -> dict:
     }
 
 
+BBH_GP_EXCLUDE = {"bbh_object_counting"}
+
+
+def _gp_no_bbh(benchmarks: dict, stored_gp: float | None) -> float | None:
+    """Return GP recomputed excluding BBH zero-shot scores.
+
+    Requires per-benchmark data from stage_record.json to compute exactly.
+    Falls back to the stored aggregate unchanged when that data isn't available
+    (approximating would introduce real error since BBH GP is not always 0).
+    """
+    gp = benchmarks.get("gp", {})
+    valid = {k: v for k, v in gp.items() if k not in BBH_GP_EXCLUDE and v is not None}
+    if valid:
+        return sum(valid.values()) / len(valid)
+    return stored_gp
+
+
 def load_run(run_dir: Path) -> dict | None:
     metrics_path = run_dir / "metrics.json"
     if not metrics_path.exists():
@@ -326,6 +343,7 @@ def load_run(run_dir: Path) -> dict | None:
             matrix = json.load(f)
 
     benchmarks = _load_benchmark_scores(run_dir)
+    metrics["GP"] = _gp_no_bbh(benchmarks, metrics.get("GP"))
 
     return {
         "seq_name": config.get("sequence") or run_dir.parent.name,
