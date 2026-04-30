@@ -50,6 +50,8 @@ PENDING_EVAL_REMOTES = ["cristian", "rafa"]   # machines running pending_eval
 PENDING_EVAL_PATH    = "~/work/cl-lora/pending_eval"
 PENDING_EVAL_LOCAL   = Path("imported_results_pending")
 SYNC_FILES           = ["metrics.json", "results_matrix.json", "run_config.json", "run_summary.json"]
+# stage_record.json files under stages/stage_*/ carry per-benchmark GP/IP breakdowns
+SYNC_STAGE_RECORDS   = True
 
 METRICS = ["AP", "FP", "GP", "IP", "Forget"]
 
@@ -161,15 +163,24 @@ def rsync_run(alias: str, seq_name: str, method: str, verbose: bool = False) -> 
     for f in SYNC_FILES:
         include_args += ["--include", f]
 
+    if SYNC_STAGE_RECORDS:
+        # Pull stages/stage_**/stage_record.json for per-benchmark GP/IP breakdown
+        include_args += [
+            "--include", "stages/",
+            "--include", "stages/stage_*/",
+            "--include", "stages/stage_*/stage_record.json",
+        ]
+
     ssh_opt = (
         f"ssh -o StrictHostKeyChecking=no"
         f" -o ControlPath={ctrl} -o ControlMaster=no"
         + (" -v" if verbose else "")
     )
     cmd = [
-        "rsync", "-az", "--no-relative", "--progress",
+        "rsync", "-az", "--progress",
         *(["-v"] if verbose else []),
         "-e", ssh_opt,
+        "--include", "*/",
         *include_args,
         "--exclude", "*",
         f"{alias}:{remote_dir}",
@@ -192,10 +203,15 @@ def _sync_normal_eval(alias: str, verbose: bool = False) -> None:
         return
     print(f"  Found {len(runs)} finished run(s): {[f'{s}/{m}' for s, m in runs]}")
     for seq_name, method in sorted(runs):
-        local_metrics = LOCAL_BASE / seq_name / method / "metrics.json"
-        if local_metrics.exists():
+        local_run = LOCAL_BASE / seq_name / method
+        local_metrics = local_run / "metrics.json"
+        has_stage_records = bool(list((local_run / "stages").glob("stage_*/stage_record.json"))) \
+            if (local_run / "stages").exists() else False
+        if local_metrics.exists() and has_stage_records:
             print(f"  [already synced] {seq_name}/{method}")
             continue
+        if local_metrics.exists():
+            print(f"  [re-syncing — missing stage_record.json] {seq_name}/{method}")
         print(f"\n  Syncing {seq_name}/{method} ...")
         rsync_run(alias, seq_name, method, verbose=verbose)
 
@@ -213,6 +229,12 @@ def _sync_pending_eval(alias: str, verbose: bool = False) -> None:
     include_args = []
     for f in SYNC_FILES:
         include_args += ["--include", f]
+
+    if SYNC_STAGE_RECORDS:
+        include_args += [
+            "--include", "stages/stage_*/stage_record.json",
+        ]
+
     cmd = [
         "rsync", "-az",
         "--include", "*/",
@@ -250,6 +272,38 @@ def sync_all(verbose: bool = False) -> None:
 # Local loading
 # ---------------------------------------------------------------------------
 
+def _load_benchmark_scores(run_dir: Path) -> dict:
+    """Load per-benchmark GP/IP scores from the final stage_record.json, if present.
+
+    Returns a dict with keys 'gp' and 'ip', each a {benchmark: score} dict,
+    or empty dicts if the data isn't available.
+    """
+    stages_dir = run_dir / "stages"
+    if not stages_dir.exists():
+        return {"gp": {}, "ip": {}}
+
+    stage_dirs = sorted(stages_dir.glob("stage_*"))
+    if not stage_dirs:
+        return {"gp": {}, "ip": {}}
+
+    # Use the last stage — that's where the final GP/IP eval runs
+    record_path = stage_dirs[-1] / "stage_record.json"
+    if not record_path.exists():
+        return {"gp": {}, "ip": {}}
+
+    try:
+        with record_path.open() as f:
+            record = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"gp": {}, "ip": {}}
+
+    general = record.get("general", {})
+    return {
+        "gp": general.get("gp") or {},
+        "ip": general.get("ip") or {},
+    }
+
+
 def load_run(run_dir: Path) -> dict | None:
     metrics_path = run_dir / "metrics.json"
     if not metrics_path.exists():
@@ -271,12 +325,15 @@ def load_run(run_dir: Path) -> dict | None:
         with matrix_path.open() as f:
             matrix = json.load(f)
 
+    benchmarks = _load_benchmark_scores(run_dir)
+
     return {
         "seq_name": config.get("sequence") or run_dir.parent.name,
         "method": run_dir.name,
         "metrics": metrics,
         "config": config,
         "matrix": matrix,
+        "benchmarks": benchmarks,
     }
 
 
@@ -299,6 +356,8 @@ def collect_runs(*roots: Path) -> list[dict]:
         for seq_dir in sorted(root.iterdir()):
             if not seq_dir.is_dir():
                 continue
+            if seq_dir.name.startswith("incomplete_"):
+                continue
             # Flat layout: seq_dir IS the run directory
             if (seq_dir / "metrics.json").exists():
                 run = load_run(seq_dir)
@@ -308,6 +367,8 @@ def collect_runs(*roots: Path) -> list[dict]:
             # Standard 2-level layout: <root>/<seq_name>/<method>/
             for method_dir in sorted(seq_dir.iterdir()):
                 if not method_dir.is_dir():
+                    continue
+                if method_dir.name.startswith("incomplete_"):
                     continue
                 run = load_run(method_dir)
                 if run is None:
@@ -427,6 +488,99 @@ def print_per_sequence_tables(df: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Benchmark table (per-benchmark GP/IP breakdown, --benchmarks flag)
+# ---------------------------------------------------------------------------
+
+BENCHMARK_SHORT = {
+    "hellaswag":         "Hella.",
+    "commonsenseqa":     "Com.",
+    "alpaca":            "Alpa.",
+    "bbh_object_counting": "BBH-Ob.",
+    "openbookqa":        "OB-QA",
+    "lambada":           "Lambada",
+}
+
+
+def print_benchmark_tables(runs: list[dict]) -> None:
+    """Print per-benchmark GP/IP tables grouped by sequence, paper-style."""
+    from collections import defaultdict
+
+    by_seq: dict[str, list[dict]] = defaultdict(list)
+    for r in runs:
+        by_seq[r["seq_name"]].append(r)
+
+    for seq, seq_runs in sorted(by_seq.items()):
+        # Collect all benchmark keys that appear across any run
+        gp_keys: list[str] = []
+        ip_keys: list[str] = []
+        for r in seq_runs:
+            b = r.get("benchmarks", {})
+            for k in b.get("gp", {}):
+                if k not in gp_keys:
+                    gp_keys.append(k)
+            for k in b.get("ip", {}):
+                if k not in ip_keys:
+                    ip_keys.append(k)
+
+        # Prefer the canonical order; append any extras
+        canonical = ["hellaswag", "commonsenseqa", "alpaca", "bbh_object_counting",
+                     "openbookqa", "lambada"]
+        gp_keys = [k for k in canonical if k in gp_keys] + [k for k in gp_keys if k not in canonical]
+        ip_keys = [k for k in canonical if k in ip_keys] + [k for k in ip_keys if k not in canonical]
+
+        if not gp_keys and not ip_keys:
+            print(f"\n[{seq}] No per-benchmark data — sync stage_record.json files first (run --sync).")
+            continue
+
+        # Column headers
+        gp_cols = [BENCHMARK_SHORT.get(k, k) for k in gp_keys]
+        ip_cols = [BENCHMARK_SHORT.get(k, k) for k in ip_keys]
+        cl_cols = ["AP", "FP", "Forget"]
+
+        header_gp = "  ".join(f"{c:>8}" for c in gp_cols)
+        header_ip = "  ".join(f"{c:>8}" for c in ip_cols)
+        header_cl = "  ".join(f"{c:>8}" for c in cl_cols)
+
+        short_names = _strip_common_suffix([r["method"] for r in seq_runs])
+        name_width = max(len(n) for n in short_names)
+
+        sep = "=" * (name_width + 4 + len(header_gp) + 4 + len(header_ip) + 4 + len(header_cl) + 4)
+        print(f"\n{sep}")
+        print(f"  {seq}  — benchmark breakdown (GP zero-shot | IP in-context | CL metrics)")
+        print(f"  (stage_record.json from final stage)")
+        print(sep)
+
+        # Header row
+        gp_label  = "Zero-shot GP".center(len(header_gp))
+        ip_label  = "In-context IP".center(len(header_ip))
+        cl_label  = "CL".center(len(header_cl))
+        print(f"  {'Method'.ljust(name_width)}  {gp_label}  {ip_label}  {cl_label}")
+        print(f"  {' ' * name_width}  {header_gp}  {header_ip}  {header_cl}")
+        print("-" * len(sep))
+
+        for r, short in zip(seq_runs, short_names):
+            b   = r.get("benchmarks", {})
+            gp  = b.get("gp", {})
+            ip  = b.get("ip", {})
+            m   = r["metrics"]
+
+            def _fmt(v) -> str:
+                return f"{v * 100:8.2f}" if v is not None else "      --"
+
+            gp_vals = "  ".join(_fmt(gp.get(k)) for k in gp_keys)
+            ip_vals = "  ".join(_fmt(ip.get(k)) for k in ip_keys)
+
+            ap  = m.get("AP")
+            fp  = m.get("FP")
+            fgt = m.get("Forget")
+            cl_vals = "  ".join([_fmt(ap), _fmt(fp), _fmt(fgt)])
+
+            print(f"  {short.ljust(name_width)}  {gp_vals}  {ip_vals}  {cl_vals}")
+
+        print(sep)
+
+
+# ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
 
@@ -508,6 +662,8 @@ def parse_args():
                    help="Directory to save plots (instead of opening windows)")
     p.add_argument("--export-csv", type=Path, default=None,
                    help="Export metrics DataFrame to CSV")
+    p.add_argument("--benchmarks", action="store_true",
+                   help="Print per-benchmark GP/IP breakdown table (requires stage_record.json in stages/)")
     p.add_argument("--verbose", action="store_true",
                    help="Pass -v to ssh/rsync for detailed connection logs")
     return p.parse_args()
@@ -539,6 +695,9 @@ def main():
     matrix_df  = build_matrix_df(runs)
 
     print_per_sequence_tables(metrics_df)
+
+    if args.benchmarks:
+        print_benchmark_tables(runs)
 
     if args.export_csv:
         metrics_df.to_csv(args.export_csv)
