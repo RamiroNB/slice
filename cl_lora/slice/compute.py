@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 from typing import Any, Dict, Optional, List, Tuple
 
 import torch
@@ -9,12 +11,10 @@ from datasets import concatenate_datasets
 from ..lora_config import build_lora_config
 from ..load_dataset import load_training_dataset
 from .cache import (
-    SliceCacheEntry,
     load_slice_cache,
     make_cache_key,
     save_ab_stats_csv,
     save_projection_stats_json,
-    save_slice_cache,
 )
 from .config import SliceInitConfig
 from .decompose import build_ab_from_gradient, build_ab_loram
@@ -316,7 +316,7 @@ def load_or_compute_slice_inits(
     retain_tasks,
     *,
     config: SliceInitConfig,
-) -> Dict[str, Dict[str, torch.Tensor]]:
+) -> Tuple[Dict[str, Dict[str, torch.Tensor]], str]:
     if config.init_method == "lora_ga":
         # Enforce guard before cache lookup so incompatible settings cannot be hidden by cache hits.
         invalid_flags = _lora_ga_incompatible_flags(config)
@@ -375,11 +375,12 @@ def load_or_compute_slice_inits(
         },
     }
     cache_key = make_cache_key(payload)
+    cache_root = os.path.join(config.cache_dir, cache_key)
     cached = load_slice_cache(config.cache_dir, cache_key, device=model_device(model))
     if cached is not None:
         save_ab_stats_csv(config.cache_dir, cache_key, cached.inits)
         logger.info("Slice cache hit: cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(cached.inits))
-        return cached.inits
+        return cached.inits, cache_root
     logger.info("Slice cache miss: will compute inits (cache_dir=%s cache_key=%s)", config.cache_dir, cache_key)
 
     if config.init_method == "loram":
@@ -399,13 +400,12 @@ def load_or_compute_slice_inits(
             config=config,
         )
 
-    save_slice_cache(
-        config.cache_dir,
-        cache_key,
-        SliceCacheEntry(inits=inits),
-        meta={"payload": payload},
-    )
+    # Inits live only in memory: by design we do not persist <cache>/<key>/inits/*.pt.
+    # The meta + stats files stay so the run record is preserved.
+    os.makedirs(cache_root, exist_ok=True)
+    with open(os.path.join(cache_root, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump({"payload": payload}, f, sort_keys=True, indent=2)
     save_ab_stats_csv(config.cache_dir, cache_key, inits)
     save_projection_stats_json(config.cache_dir, cache_key, projection_stats)
-    logger.info("Saved slice cache: cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(inits))
-    return inits
+    logger.info("Computed slice inits (not persisted): cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(inits))
+    return inits, cache_root

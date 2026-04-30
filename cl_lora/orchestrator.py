@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
+import shutil
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -56,6 +59,67 @@ def _collect_fn_defaults(fn) -> Dict[str, Any]:
 
 def _safe_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("_")
+
+
+def _safe_model_dir_name(model_name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "__", str(model_name)).strip("_")
+
+
+def _shared_base_model_is_complete(shared_dir: Path) -> bool:
+    if not shared_dir.is_dir():
+        return False
+    # HF save_pretrained always writes config.json + at least one weight shard.
+    if not (shared_dir / "config.json").is_file():
+        return False
+    has_weights = any(
+        shared_dir.glob(pat)
+        for pat in ("*.safetensors", "*.bin", "model.safetensors.index.json", "pytorch_model.bin.index.json")
+    )
+    return bool(has_weights)
+
+
+def _save_shared_base_model(model, tokenizer, shared_dir: Path) -> None:
+    """Save the base model + tokenizer once into the shared cache.
+
+    Concurrency-safe: writes into a unique temp directory next to shared_dir
+    and atomically renames it into place. If another process won the race and
+    populated shared_dir first, the temp copy is discarded.
+    """
+    shared_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp(
+        prefix=f".{shared_dir.name}.tmp-", dir=str(shared_dir.parent)
+    ))
+    try:
+        model.save_pretrained(str(tmp_dir))
+        tokenizer.save_pretrained(str(tmp_dir))
+        try:
+            os.rename(str(tmp_dir), str(shared_dir))
+        except OSError:
+            if _shared_base_model_is_complete(shared_dir):
+                shutil.rmtree(str(tmp_dir), ignore_errors=True)
+            else:
+                raise
+    except Exception:
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        raise
+
+
+def _link_shared_base_model(run_link: Path, shared_dir: Path) -> None:
+    """Create a symlink run_link → shared_dir.
+
+    If run_link is a broken symlink (target missing — e.g. the shared cache
+    was cleaned), the dangling link is removed and recreated. Existing real
+    directories/files or symlinks with a valid target are left as-is, even
+    if they point elsewhere.
+    """
+    if run_link.is_symlink():
+        if run_link.exists():
+            return
+        run_link.unlink()
+    elif run_link.exists():
+        return
+    run_link.parent.mkdir(parents=True, exist_ok=True)
+    run_link.symlink_to(shared_dir.resolve(), target_is_directory=True)
 
 
 def _to_serializable(value: Any) -> Any:
@@ -185,6 +249,7 @@ def run_sequence(
     cl_method_name: str = "vanilla",
     cl_method_kwargs: Dict[str, Any] | None = None,
     orchestrator_config: Dict[str, Any] | None = None,
+    base_model_cache_dir: str | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
     run_output_dir = run_output_dir.resolve()
@@ -320,19 +385,41 @@ def run_sequence(
     run_cfg_payload["tokenizer"] = _collect_tokenizer_info(tokenizer)
     _write_json(run_output_dir / "run_config.json", run_cfg_payload)
 
-    # Save the unmodified base model once. All stage checkpoints store only
-    # LoRA adapters; the full model is reconstructed by merging adapters onto
-    # this base at eval time.
+    # Save the unmodified base model once per (model_name, base_model_cache_dir)
+    # and symlink it into every run. All stage checkpoints store only LoRA
+    # adapters; the full model is reconstructed by merging adapters onto this
+    # base at eval time.
     base_model_ckpt = checkpoint_root / "base_model"
-    if start_stage == 1:
-        base_model_ckpt.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(str(base_model_ckpt))
-        tokenizer.save_pretrained(str(base_model_ckpt))
-        print(f"Base model saved: {base_model_ckpt}")
-    elif not base_model_ckpt.exists():
-        raise FileNotFoundError(
-            f"Resuming at stage {start_stage} but base model checkpoint not found at {base_model_ckpt}."
-        )
+    if base_model_cache_dir:
+        shared_dir = (Path(base_model_cache_dir) / _safe_model_dir_name(model_name)).resolve()
+        if start_stage == 1:
+            checkpoint_root.mkdir(parents=True, exist_ok=True)
+            if not _shared_base_model_is_complete(shared_dir):
+                _save_shared_base_model(model, tokenizer, shared_dir)
+                print(f"Base model saved to shared cache: {shared_dir}")
+            else:
+                print(f"Base model reused from shared cache: {shared_dir}")
+            _link_shared_base_model(base_model_ckpt, shared_dir)
+            print(f"Run base model link: {base_model_ckpt} -> {shared_dir}")
+        else:
+            if not base_model_ckpt.exists():
+                # Resume started before the shared-cache layout; rebuild the link.
+                if not _shared_base_model_is_complete(shared_dir):
+                    raise FileNotFoundError(
+                        f"Resuming at stage {start_stage} but base model not found at {base_model_ckpt} "
+                        f"and shared cache {shared_dir} is empty/incomplete."
+                    )
+                _link_shared_base_model(base_model_ckpt, shared_dir)
+    else:
+        if start_stage == 1:
+            base_model_ckpt.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(str(base_model_ckpt))
+            tokenizer.save_pretrained(str(base_model_ckpt))
+            print(f"Base model saved: {base_model_ckpt}")
+        elif not base_model_ckpt.exists():
+            raise FileNotFoundError(
+                f"Resuming at stage {start_stage} but base model checkpoint not found at {base_model_ckpt}."
+            )
 
     # Build the CL method object once per run. Persistent state (O-LoRA A
     # snapshots, InfLoRA covariance) lives under <run>/cl_state/ and is
@@ -588,6 +675,13 @@ def main() -> None:
     parser.add_argument("--output-root", default="results")
     parser.add_argument("--train-output-root", default="outputs")
     parser.add_argument(
+        "--base-model-cache",
+        default="outputs/base_models",
+        help="Directory holding one shared copy of the base model+tokenizer per model name. "
+             "Each run's checkpoints/base_model becomes a symlink into this cache. "
+             "Pass an empty string to disable sharing and save a full copy under each run.",
+    )
+    parser.add_argument(
         "--general-eval-set",
         choices=["core", "all"],
         default="core",
@@ -836,6 +930,7 @@ def main() -> None:
             "seed_prompts_per_task": args.cl_sapt_seed_prompts_per_task,
         },
         orchestrator_config=orchestrator_config,
+        base_model_cache_dir=(args.base_model_cache or None),
     )
 
     if not args.train_only:
