@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -77,19 +79,44 @@ def _shared_base_model_is_complete(shared_dir: Path) -> bool:
 
 
 def _save_shared_base_model(model, tokenizer, shared_dir: Path) -> None:
-    """Save the base model + tokenizer once into the shared cache."""
-    shared_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(shared_dir))
-    tokenizer.save_pretrained(str(shared_dir))
+    """Save the base model + tokenizer once into the shared cache.
+
+    Concurrency-safe: writes into a unique temp directory next to shared_dir
+    and atomically renames it into place. If another process won the race and
+    populated shared_dir first, the temp copy is discarded.
+    """
+    shared_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp(
+        prefix=f".{shared_dir.name}.tmp-", dir=str(shared_dir.parent)
+    ))
+    try:
+        model.save_pretrained(str(tmp_dir))
+        tokenizer.save_pretrained(str(tmp_dir))
+        try:
+            os.rename(str(tmp_dir), str(shared_dir))
+        except OSError:
+            if _shared_base_model_is_complete(shared_dir):
+                shutil.rmtree(str(tmp_dir), ignore_errors=True)
+            else:
+                raise
+    except Exception:
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        raise
 
 
 def _link_shared_base_model(run_link: Path, shared_dir: Path) -> None:
-    """Create a symlink run_link → shared_dir if run_link does not exist.
+    """Create a symlink run_link → shared_dir.
 
-    Never deletes or replaces anything: an existing real directory or symlink
-    at run_link is left as-is, even if it points elsewhere.
+    If run_link is a broken symlink (target missing — e.g. the shared cache
+    was cleaned), the dangling link is removed and recreated. Existing real
+    directories/files or symlinks with a valid target are left as-is, even
+    if they point elsewhere.
     """
-    if run_link.exists() or run_link.is_symlink():
+    if run_link.is_symlink():
+        if run_link.exists():
+            return
+        run_link.unlink()
+    elif run_link.exists():
         return
     run_link.parent.mkdir(parents=True, exist_ok=True)
     run_link.symlink_to(shared_dir.resolve(), target_is_directory=True)
