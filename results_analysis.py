@@ -53,6 +53,13 @@ SYNC_FILES           = ["metrics.json", "results_matrix.json", "run_config.json"
 # stage_record.json files under stages/stage_*/ carry per-benchmark GP/IP breakdowns
 SYNC_STAGE_RECORDS   = True
 
+RANK128_RESULTS = Path("/mnt/D-SSD/cl-lora-ramiro/results")
+CL_BASELINES_ROOTS = [
+    Path("/mnt/E-SSD/cl-baselines/cl-lora/results/TRACE/basic_methods"),
+    Path("/mnt/E-SSD/cl-baselines/cl-lora/results/NI-Seq-G2/basic_methods"),
+    Path("/mnt/E-SSD/joana-ramiro/all_results/opposing_seqs_commit_42175dc/NI-Seq-G1"),
+]
+
 METRICS = ["AP", "FP", "GP", "IP", "Forget"]
 
 
@@ -321,6 +328,16 @@ def _gp_no_bbh(benchmarks: dict, stored_gp: float | None) -> float | None:
     return stored_gp
 
 
+def _try_recompute_summary(run_dir: Path) -> None:
+    """Recompute metrics.json from stage_record.json files if they exist."""
+    try:
+        from cl_lora.eval_standalone import recompute_run_summary
+        recompute_run_summary(run_dir)
+        print(f"  [recomputed] metrics for {run_dir.name}")
+    except Exception as e:
+        print(f"  [warn] could not recompute summary for {run_dir.name}: {e}")
+
+
 def load_run(run_dir: Path) -> dict | None:
     metrics_path = run_dir / "metrics.json"
     if not metrics_path.exists():
@@ -328,6 +345,16 @@ def load_run(run_dir: Path) -> dict | None:
 
     with metrics_path.open() as f:
         metrics = json.load(f)
+
+    # If all metrics are null but stage records exist, recompute on the fly.
+    if all(metrics.get(m) is None for m in METRICS):
+        has_stage_records = any(
+            (run_dir / "stages").glob("stage_*/stage_record.json")
+        )
+        if has_stage_records:
+            _try_recompute_summary(run_dir)
+            with metrics_path.open() as f:
+                metrics = json.load(f)
 
     config = {}
     config_path = run_dir / "run_config.json"
@@ -360,7 +387,13 @@ def _run_completeness(run: dict) -> int:
     return sum(1 for m in METRICS if run["metrics"].get(m) is not None)
 
 
-def collect_runs(*roots: Path) -> list[dict]:
+def collect_runs(*roots: Path | tuple[Path, str | None]) -> list[dict]:
+    """Collect finished runs from one or more root directories.
+
+    Each item may be a plain Path or a (Path, rank_tag) tuple. When a
+    rank_tag is given (e.g. "r64", "r128") it is appended to every method
+    name loaded from that root so results from different ranks are distinct.
+    """
     best: dict[tuple[str, str], dict] = {}
 
     def _consider(run: dict) -> None:
@@ -368,10 +401,20 @@ def collect_runs(*roots: Path) -> list[dict]:
         if key not in best or _run_completeness(run) > _run_completeness(best[key]):
             best[key] = run
 
-    for root in roots:
-        if not root.exists():
+    for item in roots:
+        root, rank_tag = item if isinstance(item, tuple) else (item, None)
+        try:
+            if not root.exists():
+                continue
+        except PermissionError:
+            print(f"  [skip – permission denied] {root}")
             continue
-        for seq_dir in sorted(root.iterdir()):
+        try:
+            seq_dirs = sorted(root.iterdir())
+        except PermissionError:
+            print(f"  [skip – permission denied] {root}")
+            continue
+        for seq_dir in seq_dirs:
             if not seq_dir.is_dir():
                 continue
             if seq_dir.name.startswith("incomplete_"):
@@ -380,10 +423,17 @@ def collect_runs(*roots: Path) -> list[dict]:
             if (seq_dir / "metrics.json").exists():
                 run = load_run(seq_dir)
                 if run is not None:
+                    if rank_tag and not run["method"].endswith(f"_{rank_tag}"):
+                        run["method"] = f"{run['method']}_{rank_tag}"
                     _consider(run)
                 continue
             # Standard 2-level layout: <root>/<seq_name>/<method>/
-            for method_dir in sorted(seq_dir.iterdir()):
+            try:
+                method_dirs = sorted(seq_dir.iterdir())
+            except PermissionError:
+                print(f"  [skip – permission denied] {seq_dir}")
+                continue
+            for method_dir in method_dirs:
                 if not method_dir.is_dir():
                     continue
                 if method_dir.name.startswith("incomplete_"):
@@ -392,6 +442,8 @@ def collect_runs(*roots: Path) -> list[dict]:
                 if run is None:
                     print(f"  [skip – not finished] {method_dir.relative_to(root)}")
                     continue
+                if rank_tag and not run["method"].endswith(f"_{rank_tag}"):
+                    run["method"] = f"{run['method']}_{rank_tag}"
                 _consider(run)
 
     return list(best.values())
@@ -407,6 +459,22 @@ def build_metrics_df(runs: list[dict]) -> pd.DataFrame:
         row = {"seq_name": r["seq_name"], "method": r["method"]}
         for m in METRICS:
             row[m] = r["metrics"].get(m)
+        rows.append(row)
+    return pd.DataFrame(rows).set_index(["seq_name", "method"])
+
+
+def build_full_df(runs: list[dict]) -> pd.DataFrame:
+    """Build a flat DataFrame with CL metrics + per-benchmark GP/IP scores."""
+    rows = []
+    for r in runs:
+        row = {"seq_name": r["seq_name"], "method": r["method"]}
+        for m in METRICS:
+            row[m] = r["metrics"].get(m)
+        b = r.get("benchmarks", {})
+        for k, v in b.get("gp", {}).items():
+            row[f"gp_{k}"] = v
+        for k, v in b.get("ip", {}).items():
+            row[f"ip_{k}"] = v
         rows.append(row)
     return pd.DataFrame(rows).set_index(["seq_name", "method"])
 
@@ -667,7 +735,11 @@ def parse_args():
                    help="Skip analysis (useful with --sync to only fetch data)")
     p.add_argument("--roots", nargs="+",
                    default=["imported_results", str(PENDING_EVAL_LOCAL), str(MOTOX_RESULTS)],
-                   help="Local folders to scan for results")
+                   help="Local folders to scan for results (tagged as r64)")
+    p.add_argument("--rank128-root", type=Path, default=RANK128_RESULTS,
+                   help="Root dir for rank-128 results (tagged as r128); set to '' to disable")
+    p.add_argument("--cl-baselines-roots", nargs="+", type=Path, default=CL_BASELINES_ROOTS,
+                   help="Root dirs for CL baseline results (no rank tag)")
     p.add_argument("--seq", nargs="+", default=None,
                    help="Filter to specific sequence names")
     p.add_argument("--method", nargs="+", default=None,
@@ -679,7 +751,9 @@ def parse_args():
     p.add_argument("--save-plots", type=Path, default=None,
                    help="Directory to save plots (instead of opening windows)")
     p.add_argument("--export-csv", type=Path, default=None,
-                   help="Export metrics DataFrame to CSV")
+                   help="Export metrics + per-benchmark scores to CSV")
+    p.add_argument("--export-json", type=Path, default=None,
+                   help="Export metrics + per-benchmark scores to JSON")
     p.add_argument("--benchmarks", action="store_true",
                    help="Print per-benchmark GP/IP breakdown table (requires stage_record.json in stages/)")
     p.add_argument("--verbose", action="store_true",
@@ -696,9 +770,21 @@ def main():
     if args.no_analyse:
         return
 
-    roots = [Path(r) for r in args.roots]
-    print(f"\nScanning local roots: {[str(r) for r in roots]}")
-    runs = collect_runs(*roots)
+    roots_with_tags: list[Path | tuple[Path, str | None]] = [
+        (Path(r), "r64") for r in args.roots
+    ]
+    if args.rank128_root and str(args.rank128_root):
+        roots_with_tags.append((args.rank128_root, "r128"))
+    for p in (args.cl_baselines_roots or []):
+        if str(p):
+            roots_with_tags.append((p, None))
+
+    print(f"\nScanning roots:")
+    for item in roots_with_tags:
+        root, tag = item if isinstance(item, tuple) else (item, None)
+        print(f"  {root}  [tag: {tag or 'none'}]")
+
+    runs = collect_runs(*roots_with_tags)
 
     if not runs:
         print("No finished runs found locally.")
@@ -710,6 +796,7 @@ def main():
         runs = [r for r in runs if r["method"] in args.method]
 
     metrics_df = build_metrics_df(runs)
+    full_df    = build_full_df(runs)
     matrix_df  = build_matrix_df(runs)
 
     print_per_sequence_tables(metrics_df)
@@ -718,8 +805,20 @@ def main():
         print_benchmark_tables(runs)
 
     if args.export_csv:
-        metrics_df.to_csv(args.export_csv)
-        print(f"\nExported metrics to {args.export_csv}")
+        full_df.to_csv(args.export_csv)
+        print(f"\nExported metrics + benchmarks to {args.export_csv}")
+
+    if args.export_json:
+        records = []
+        for r in runs:
+            records.append({
+                "seq_name":   r["seq_name"],
+                "method":     r["method"],
+                "metrics":    {k: r["metrics"].get(k) for k in METRICS},
+                "benchmarks": r.get("benchmarks", {}),
+            })
+        args.export_json.write_text(json.dumps(records, indent=2))
+        print(f"\nExported metrics + benchmarks to {args.export_json}")
 
     if args.plot:
         plot_metrics_bar(metrics_df, save_dir=args.save_plots)

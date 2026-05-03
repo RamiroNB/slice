@@ -388,6 +388,20 @@ def main() -> None:
                 print(f"Skipping {sd} (no eval_manifest.json)")
                 continue
             is_final = sd == final_stage
+            if (sd / "stage_record.json").exists():
+                if not is_final:
+                    print(f"Skipping {sd.name} (stage_record.json already exists)")
+                    continue
+                # For the final stage, only skip if benchmarks were already run.
+                try:
+                    import json as _json
+                    sr = _json.loads((sd / "stage_record.json").read_text())
+                    if sr.get("general") and sr["general"].get("gp"):
+                        print(f"Skipping {sd.name} (stage_record.json with benchmarks already exists)")
+                        continue
+                except Exception:
+                    pass
+                print(f"Re-running {sd.name} (final stage — benchmarks missing)")
             skip_general_this_stage = skip_general
             if final_only and not is_final:
                 skip_general_this_stage = True
