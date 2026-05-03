@@ -437,7 +437,8 @@ def run_sequence(
         task_name = task.name
         safe_task_name = _safe_name(task_name)
 
-        stage_train_dir = train_output_dir / sequence_name / f"stage_{idx:02d}_{safe_task_name}"
+        # Namespace by run_name: shared paths let later runs clobber training_report.json that eval_standalone reads back into every run's stage_record.
+        stage_train_dir = train_output_dir / sequence_name / run_output_dir.name / f"stage_{idx:02d}_{safe_task_name}"
         stage_eval_dir = run_output_dir / "stages" / f"stage_{idx:02d}_{safe_task_name}"
 
         print(f"\n=== Stage {idx}/{len(sequence.tasks)} | Training task: {task_name} ===")
