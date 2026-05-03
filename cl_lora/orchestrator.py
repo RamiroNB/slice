@@ -545,8 +545,13 @@ def run_sequence(
         stage_eval_dir.mkdir(parents=True, exist_ok=True)
         sapt_router_path: str | None = None
         if sapt_active:
+            # Prefer the per-stage snapshot (enables full-matrix AP evaluation).
+            # Fall back to the canonical router.pt for backward compat.
+            stage_router_file = cl_state_dir / "sapt" / f"router_stage_{idx:02d}.pt"
             router_file = cl_state_dir / "sapt" / "router.pt"
-            if router_file.exists():
+            if stage_router_file.exists():
+                sapt_router_path = str(stage_router_file.resolve())
+            elif router_file.exists():
                 sapt_router_path = str(router_file.resolve())
 
         _write_json(
