@@ -274,6 +274,58 @@ def load_model_with_adapters(
     return model
 
 
+def _compute_lora_ba_norms(lora_model, lora_alpha: float, rank: int, *, use_rslora: bool = True) -> Dict[str, Any]:
+    """Walk PEFT model and compute ||B @ A||_F per LoRA layer.
+
+    Returns raw and effective (rsLoRA-scaled) norms plus aggregates.
+    Effective ΔW per layer = (alpha / sqrt(r)) * B @ A under rsLoRA, or
+    (alpha / r) * B @ A under classic LoRA.
+    """
+    import math
+    raw_norms: Dict[str, float] = {}
+    eff_norms: Dict[str, float] = {}
+    scale = lora_alpha / (math.sqrt(rank) if use_rslora else rank)
+    with torch.no_grad():
+        for name, module in lora_model.named_modules():
+            la = getattr(module, "lora_A", None)
+            lb = getattr(module, "lora_B", None)
+            if la is None or lb is None:
+                continue
+            if not (hasattr(la, "items") or hasattr(la, "keys")):
+                continue
+            for adapter_name in list(la.keys()):
+                A = la[adapter_name].weight  # (r, in)
+                B = lb[adapter_name].weight  # (out, r)
+                # ||B @ A||_F as float
+                ba_f = torch.linalg.matrix_norm(B.float() @ A.float(), ord="fro").item()
+                key = f"{name}::{adapter_name}"
+                raw_norms[key] = ba_f
+                eff_norms[key] = scale * ba_f
+    if not raw_norms:
+        return {
+            "raw_per_layer": {},
+            "effective_per_layer": {},
+            "scale": float(scale),
+            "num_layers": 0,
+        }
+    raw_vals = list(raw_norms.values())
+    eff_vals = list(eff_norms.values())
+    return {
+        "raw_per_layer": raw_norms,
+        "effective_per_layer": eff_norms,
+        "scale": float(scale),
+        "num_layers": len(raw_norms),
+        "raw_mean": float(sum(raw_vals) / len(raw_vals)),
+        "raw_max": float(max(raw_vals)),
+        "raw_min": float(min(raw_vals)),
+        "raw_total": float(sum(raw_vals)),
+        "effective_mean": float(sum(eff_vals) / len(eff_vals)),
+        "effective_max": float(max(eff_vals)),
+        "effective_min": float(min(eff_vals)),
+        "effective_total": float(sum(eff_vals)),
+    }
+
+
 def train_on_task(
     model,
     tokenizer,
@@ -281,6 +333,7 @@ def train_on_task(
     output_dir: str,
     retain_tasks=None,
     rank: int = 64,
+    lora_alpha: int = 2,
     learning_rate: float = 1e-4,
     num_train_epochs: float = 3.0,
     per_device_train_batch_size: int = 16,
@@ -344,7 +397,7 @@ def train_on_task(
     train_dataset = _tokenize_dataset(train_dataset, tokenizer=tokenizer, max_length=max_seq_length)
     eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
 
-    lora_cfg = build_lora_config(r=rank)
+    lora_cfg = build_lora_config(r=rank, lora_alpha=lora_alpha)
     if sapt_mode:
         if not sapt_adapter_name:
             raise ValueError("sapt_mode=True requires a non-empty sapt_adapter_name.")
@@ -438,6 +491,8 @@ def train_on_task(
         retain_tasks=retain_tasks,
     )
 
+    ba_norms_init = _compute_lora_ba_norms(lora_model, lora_alpha=float(lora_alpha), rank=int(rank))
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -474,6 +529,7 @@ def train_on_task(
 
     train_result = trainer.train()
     eval_metrics = trainer.evaluate()
+    ba_norms_final = _compute_lora_ba_norms(lora_model, lora_alpha=float(lora_alpha), rank=int(rank))
 
     # CL-method post-training hook (e.g. snapshot O-LoRA A's, accumulate
     # InfLoRA covariance). Runs on the still-LoRA-wrapped model BEFORE merge.
@@ -546,6 +602,13 @@ def train_on_task(
         "task_name": getattr(task, "name", str(task)),
         "train_metrics": train_result.metrics,
         "eval_metrics": eval_metrics,
+        "ba_norms": {
+            "init": ba_norms_init,
+            "final": ba_norms_final,
+            "lora_alpha": float(lora_alpha),
+            "rank": int(rank),
+            "use_rslora": True,
+        },
         "output_dir": str(output_path),
         "configs": {
             "seed": int(seed),

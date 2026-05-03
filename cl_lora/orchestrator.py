@@ -218,6 +218,7 @@ def run_sequence(
     save_final_model: bool,
     resume: bool,
     rank: int,
+    lora_alpha: int,
     slice_enabled: bool,
     slice_cache_dir: str,
     slice_max_steps: int,
@@ -269,6 +270,7 @@ def run_sequence(
         "task_eval_samples": int(task_eval_samples),
         "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
         "rank": int(rank),
+        "lora_alpha": int(lora_alpha),
         "slice_enabled": bool(slice_enabled),
         "slice_cache_dir": slice_cache_dir,
         "slice_max_steps": int(slice_max_steps),
@@ -465,6 +467,7 @@ def run_sequence(
             seed=seed,
             retain_tasks=retain_tasks,
             rank=rank,
+            lora_alpha=lora_alpha,
             adapter_checkpoint_path=str(adapter_checkpoint_dir),
             slice_enabled=slice_enabled,
             slice_cache_dir=slice_cache_dir,
@@ -716,6 +719,12 @@ def main() -> None:
         default=128,
         help="LoRA rank (also used for slice init when --slice-init is enabled).",
     )
+    parser.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=2,
+        help="LoRA alpha (rsLoRA scaling = alpha / sqrt(r)). Defaults to 2.",
+    )
     parser.add_argument("--slice-grad-project", action="store_true", help="Project forget gradients against retain gradients for slice init.")
     parser.add_argument(
         "--slice-grad-projection-mode",
@@ -884,6 +893,7 @@ def main() -> None:
         save_final_model=args.save_final_model,
         resume=args.resume,
         rank=args.rank,
+        lora_alpha=args.lora_alpha,
         slice_enabled=args.slice_init,
         slice_cache_dir=args.slice_cache_dir,
         slice_max_steps=args.slice_max_steps,
