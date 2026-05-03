@@ -96,6 +96,12 @@ def _patched_lora_forward(self, x, *args, **kwargs):
 
     # Base layer output (unmodified path through frozen weights).
     result = self.base_layer(x, *args, **kwargs)
+    # PEFT's LoraLinear.forward records the base output's dtype here and
+    # casts back at the end. We must do the same: LoRA adapters are usually
+    # stored as fp32 while the base is bf16, so result + delta promotes to
+    # fp32, and the next layer's bf16 base_layer would then reject its fp32
+    # input.
+    torch_result_dtype = result.dtype
 
     if x.dim() == 3:
         # Standard transformer activation: (B, T, d_in). Routing is one alpha
@@ -113,11 +119,11 @@ def _patched_lora_forward(self, x, *args, **kwargs):
         lora_A = self.lora_A[name]
         lora_B = self.lora_B[name]
         scaling = float(self.scaling[name])
-        dropout = self.lora_dropout.get(name, nn.Identity())
+        dropout = self.lora_dropout[name] if name in self.lora_dropout else nn.Identity()
         delta = lora_B(lora_A(dropout(x.to(lora_A.weight.dtype)))) * scaling
         alpha_i = weights[:, col].view(*alpha_view).to(dtype=delta.dtype, device=delta.device)
         result = result + alpha_i * delta
-    return result
+    return result.to(torch_result_dtype)
 
 
 def install_lora_forward_patch() -> None:
@@ -170,6 +176,13 @@ class SAPTWrapper(nn.Module):
         self.model = peft_model
         self.router = router
         self.adapter_names = list(adapter_names)
+        # Co-locate the router with the model. Standalone eval (load_sapt_model)
+        # loads the router on CPU; without this the first forward fails with a
+        # cpu/cuda mat2 mismatch in router.query_proj.
+        try:
+            self.router.to(next(peft_model.parameters()).device)
+        except StopIteration:
+            pass
         # Activate every adapter so PEFT keeps their weights live in the
         # forward graph; the patched forward decides which to mix and how.
         try:
