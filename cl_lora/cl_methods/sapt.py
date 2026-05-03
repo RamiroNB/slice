@@ -244,7 +244,11 @@ class SAPTMethod(CLMethod):
         }
         torch.save(payload, os.path.join(sapt_dir, "sapt_state.pt"))
         if self._router_packed is not None:
+            # Canonical file — overwritten each stage; kept for backward compat / resume.
             torch.save(self._router_packed, os.path.join(sapt_dir, "router.pt"))
+            # Per-stage snapshot so every stage can be evaluated independently.
+            n = len(self.adapter_names)
+            torch.save(self._router_packed, os.path.join(sapt_dir, f"router_stage_{n:02d}.pt"))
 
     def load(self, state_dir: str) -> None:
         path = os.path.join(state_dir, "sapt", "sapt_state.pt")
