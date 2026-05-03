@@ -205,9 +205,9 @@ export CL_LORA_DATASET_CACHE=/path/to/shared/cache
 
 Training artifacts:
 
-- outputs/<sequence>/stage_xx_<task_name>/
-- outputs/<sequence>/stage_xx_<task_name>/adapter/
-- outputs/<sequence>/stage_xx_<task_name>/checkpoint-*/
+- outputs/<sequence>/<run_name>/stage_xx_<task_name>/
+- outputs/<sequence>/<run_name>/stage_xx_<task_name>/adapter/
+- outputs/<sequence>/<run_name>/stage_xx_<task_name>/checkpoint-*/
 
 Experiment outputs:
 

@@ -326,7 +326,7 @@ before each evaluation step.  All paths are stored as absolute paths.
   "task_eval_samples": 64,
   "task_eval_max_new_tokens": 64,
   "seed": 42,
-  "train_output_dir": "/absolute/path/to/outputs/NI-Seq-G1/stage_01_..."
+  "train_output_dir": "/absolute/path/to/outputs/NI-Seq-G1/<run_name>/stage_01_..."
 }
 ```
 
