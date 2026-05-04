@@ -235,6 +235,11 @@ def load_sapt_model(
     for i, ap in enumerate(adapter_paths):
         name = f"task_{i + 1:02d}"
         adapter_names.append(name)
+        # PEFT saves named adapters to {path}/{adapter_name}/ when using
+        # selected_adapters. Resolve that subdirectory when present.
+        named_subdir = Path(ap) / name
+        if named_subdir.is_dir() and (named_subdir / "adapter_config.json").exists():
+            ap = str(named_subdir)
         if peft_model is None:
             peft_model = PeftModel.from_pretrained(base, ap, adapter_name=name)
         else:

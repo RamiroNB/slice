@@ -369,6 +369,9 @@ def run_sequence(
                 peft_model = None
                 for i, ap in enumerate(adapter_paths_resume):
                     name = SAPTMethod.adapter_name_for_stage(i + 1)
+                    named_subdir = Path(ap) / name
+                    if named_subdir.is_dir() and (named_subdir / "adapter_config.json").exists():
+                        ap = str(named_subdir)
                     if peft_model is None:
                         peft_model = PeftModel.from_pretrained(base, ap, adapter_name=name)
                     else:
