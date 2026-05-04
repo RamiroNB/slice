@@ -201,6 +201,19 @@ class SAPTWrapper(nn.Module):
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
 
+    def tie_weights(self):
+        return self.model.tie_weights()
+
+    def __getattr__(self, name: str):
+        # Delegate unknown attribute lookups to the inner PEFT model so that
+        # lm_eval / HF interfaces that expect a standard model (e.g.
+        # resize_token_embeddings, get_output_embeddings) work without listing
+        # every method explicitly.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model, name)
+
     def _compute_weights(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor]) -> torch.Tensor:
         embed_layer = self.get_input_embeddings()
         with torch.no_grad():
