@@ -17,6 +17,7 @@ Output: ./figs/*.png and ./figs/*.pdf
 
 import argparse
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -45,24 +46,25 @@ SEQ_RENAME = {
 SEQ_ORDER = ["G1", "G2", "Opp-v2", "Opp-v3", "Opp-v4", "TRACE"]
 
 # Sequence to use for the single-sequence scatter plot (plot 3).
-HIGHLIGHT_SEQ = "G2"
+HIGHLIGHT_SEQ = "G1"
 
 # Selected SLICE variants: key must be a substring of the method name in the CSV.
 # Longer keys are tried before shorter ones to avoid ambiguous matches.
 SELECTED_SLICE_CFG = {
-    "magpreserve":   {"label": "MagPres (global)", "marker": "o"},
+    # "magpreserve":   {"label": "MagPres (global)", "marker": "o"},
     "cagrad_c050":   {"label": "CAGrad c=0.50",    "marker": "s"},
     "cagrad_c075":   {"label": "CAGrad c=0.75",    "marker": "^"},
     "slice_lora_ga": {"label": "LoRA-GA (slice)",  "marker": "D"},
-    "slice_top_r":   {"label": "Top-r (slice)",    "marker": "P"},
+    # "slice_top_r":   {"label": "Top-r (slice)",    "marker": "P"},
+    "basic_lora_ga":    {"label": "basic slice",       "marker": "P"},
 }
 
 # Baseline methods (same matching rule as above).
 BASELINE_CFG = {
     "vanilla":      {"label": "Vanilla LoRA",  "marker": "o"},
     "loram":        {"label": "LoRAM",         "marker": "s"},
-    "lora_ga_topr": {"label": "LoRA-GA Top-r", "marker": "P"},
-    "lora_ga":      {"label": "LoRA-GA",       "marker": "D"},
+    # "lora_ga_topr": {"label": "LoRA-GA Top-r", "marker": "P"},
+    "lora_ga_lora_ga":      {"label": "LoRA-GA",       "marker": "D"},
 }
 
 # Other slice variants shown in the appendix scatter (no individual labels).
@@ -107,6 +109,12 @@ SEQUENCES: list = []
 # Data loading
 # ============================================================
 
+def extract_rank(method: str) -> str:
+    """Return 'rN' from a trailing _rN suffix, defaulting to 'r64'."""
+    m = re.search(r'_r(\d+)$', method)
+    return f"r{m.group(1)}" if m else "r64"
+
+
 def _match_key(method: str, keys: list[str]) -> str | None:
     """Exact match first; then try substring matches, longest key first."""
     if method in keys:
@@ -117,7 +125,7 @@ def _match_key(method: str, keys: list[str]) -> str | None:
     return None
 
 
-def load_data(csv_path: str) -> None:
+def load_data(csv_path: str, rank_filter: str | None = None) -> None:
     global selected_slice, other_slice, baselines
     global labels_selected, labels_baseline, markers_selected, markers_baseline
     global SEQUENCES
@@ -130,6 +138,9 @@ def load_data(csv_path: str) -> None:
 
     df = df.copy()
     df["seq"] = df["seq_name"].map(lambda s: SEQ_RENAME.get(s, s))
+    df["rank"] = df["method"].map(extract_rank)
+    if rank_filter:
+        df = df[df["rank"] == rank_filter]
     df = df.dropna(subset=["AP", "FP"])
 
     def _build(cfg: dict) -> dict:
@@ -772,20 +783,8 @@ def plot_winloss():
 # ============================================================
 # Run all
 # ============================================================
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate CL result plots from CSV.")
-    parser.add_argument("--csv", default=CSV_PATH,
-                        help=f"Path to results CSV (default: {CSV_PATH})")
-    parser.add_argument("--out", default=OUT,
-                        help=f"Output directory for figures (default: {OUT})")
-    args = parser.parse_args()
-
-    OUT = args.out
-    os.makedirs(OUT, exist_ok=True)
-
-    load_data(args.csv)
-
-    print("\nGenerating all plots...")
+def _run_all_plots(rank_label: str) -> None:
+    print(f"\nGenerating plots for rank={rank_label} ...")
     plot_scatter_selected();    print("  [1/8] cl_scatter_selected")
     plot_scatter_all_variants();print("  [2/8] cl_scatter_all_variants")
     plot_highlight_seq();       print(f"  [3/8] cl_scatter_{HIGHLIGHT_SEQ}")
@@ -794,4 +793,34 @@ if __name__ == "__main__":
     plot_radar();               print("  [6/8] cl_radar")
     plot_mean_rank();           print("  [7/8] cl_mean_rank")
     plot_winloss();             print("  [8/8] cl_winloss")
-    print(f"\nDone. Output in {OUT}/")
+    print(f"  Done. Output in {OUT}/")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate CL result plots from CSV.")
+    parser.add_argument("--csv", default=CSV_PATH,
+                        help=f"Path to results CSV (default: {CSV_PATH})")
+    parser.add_argument("--out", default=OUT,
+                        help=f"Output directory for figures (default: {OUT})")
+    parser.add_argument("--rank", default=None,
+                        help="Filter to a specific rank (e.g. r64, r128). "
+                             "If omitted, all ranks are plotted in separate subdirectories.")
+    args = parser.parse_args()
+
+    base_out = args.out
+
+    if args.rank:
+        ranks = [args.rank]
+    else:
+        df_all = pd.read_csv(args.csv)
+        ranks = sorted(df_all["method"].map(extract_rank).unique())
+        print(f"Detected ranks: {ranks}")
+
+    for rank in ranks:
+        OUT = os.path.join(base_out, rank)
+        os.makedirs(OUT, exist_ok=True)
+        load_data(args.csv, rank_filter=rank)
+        if not SEQUENCES:
+            print(f"  [skip] no data for rank={rank}")
+            continue
+        _run_all_plots(rank)

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from collections import defaultdict
 
@@ -56,6 +57,12 @@ BENCHMARK_SHORT = {
 
 # GP and IP exclude BBH zero-shot since it's broken for existing data
 GP_EXCLUDE = {"bbh_object_counting"}
+
+
+def extract_rank(method: str) -> str:
+    """Return 'rN' from a trailing _rN suffix, defaulting to 'r64'."""
+    m = re.search(r'_r(\d+)$', method)
+    return f"r{m.group(1)}" if m else "r64"
 
 
 def _strip_common_suffix(names: list[str]) -> list[str]:
@@ -549,6 +556,9 @@ def parse_args():
                    help="Filter to methods whose name contains any of these strings")
     p.add_argument("--heatmap", action="store_true",
                    help="Plot paper-style 3-panel heatmap (trained tasks + GP/IP benchmarks)")
+    p.add_argument("--rank", default=None,
+                   help="Filter to a specific rank (e.g. r64, r128). "
+                        "If omitted, all ranks are plotted in separate subdirectories.")
     p.add_argument("--save", type=Path, default=None,
                    help="Directory to save plots as .png (default: show interactively)")
     return p.parse_args()
@@ -559,37 +569,52 @@ def main():
 
     seq_label = f"'{args.seq}'" if args.seq else "all sequences"
     print(f"Collecting runs for {seq_label} ...")
-    runs = collect_runs_for_seq(args.seq, args.method)
+    all_runs = collect_runs_for_seq(args.seq, args.method)
 
-    if not runs:
+    if not all_runs:
         print(f"No runs with stage_record.json data found for {seq_label}.")
         print("Run eval_standalone with benchmarks enabled at every stage first.")
         return
 
-    full_curve = [r for r in runs if len(_stage_series(r)) > 1]
-    final_only = [r for r in runs if len(_stage_series(r)) == 1]
-    print(f"  {len(full_curve)} run(s) with full per-stage curves")
-    print(f"  {len(final_only)} run(s) with final-stage data only")
+    # Group all runs by rank
+    by_rank: dict[str, list[dict]] = defaultdict(list)
+    for r in all_runs:
+        by_rank[extract_rank(r["method"])].append(r)
 
-    # Group by sequence for curve/per-benchmark plots (which are per-sequence)
-    from collections import defaultdict
-    by_seq: dict[str, list[dict]] = defaultdict(list)
-    for r in runs:
-        by_seq[r["seq"]].append(r)
+    ranks_to_plot = [args.rank] if args.rank else sorted(by_rank.keys())
+    if not args.rank:
+        print(f"Detected ranks: {ranks_to_plot}")
 
-    for seq, seq_runs in sorted(by_seq.items()):
-        if args.heatmap:
-            for run in seq_runs:
-                print(f"  heatmap: {seq}/{run['method']}")
-                plot_heatmap(run, args.save)
+    for rank in ranks_to_plot:
+        runs = by_rank.get(rank, [])
+        if not runs:
+            print(f"  [skip] no runs for rank={rank}")
+            continue
 
-        if "per_benchmark" in args.metric:
-            plot_per_benchmark(seq_runs, seq, args.save)
-            other = [m for m in args.metric if m != "per_benchmark"]
-            if other:
-                plot_gp_ip(seq_runs, other, seq, args.save)
-        else:
-            plot_gp_ip(seq_runs, args.metric, seq, args.save)
+        save_dir = (args.save / rank) if args.save else None
+
+        full_curve = [r for r in runs if len(_stage_series(r)) > 1]
+        final_only = [r for r in runs if len(_stage_series(r)) == 1]
+        print(f"\nRank={rank}: {len(full_curve)} run(s) with full curves, "
+              f"{len(final_only)} run(s) final-only")
+
+        by_seq: dict[str, list[dict]] = defaultdict(list)
+        for r in runs:
+            by_seq[r["seq"]].append(r)
+
+        for seq, seq_runs in sorted(by_seq.items()):
+            if args.heatmap:
+                for run in seq_runs:
+                    print(f"  heatmap: {seq}/{run['method']}")
+                    plot_heatmap(run, save_dir)
+
+            if "per_benchmark" in args.metric:
+                plot_per_benchmark(seq_runs, seq, save_dir)
+                other = [m for m in args.metric if m != "per_benchmark"]
+                if other:
+                    plot_gp_ip(seq_runs, other, seq, save_dir)
+            else:
+                plot_gp_ip(seq_runs, args.metric, seq, save_dir)
 
 
 if __name__ == "__main__":
