@@ -14,7 +14,7 @@
 #
 # Runs sapt.sh (5 inits, fully sequential) on each of 3 sequences in parallel,
 # one sequence per GPU (NI-Seq-G2 → GPU 0, TRACE → GPU 1, v4 → GPU 2).
-# Results land in <FIXED_REPO>/results/, outputs in <FIXED_REPO>/outputs/.
+# Results land in <REPO_ROOT>/results/, outputs in <REPO_ROOT>/outputs/.
 #
 # Override env vars from the sbatch command line, e.g.:
 #   sbatch --export=ALL,RUN_SUFFIX=ciars01,ONLY_INITS="lora_vanilla loram" \
@@ -36,15 +36,16 @@ conda activate "${CONDA_ENV}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FIXED_REPO="${FIXED_REPO:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-/home/joanapasquali/cl-lora}"
 PYTHON_BIN="${PYTHON_BIN:-$(conda run -n "${CONDA_ENV}" which python)}"
+SOUT_DIR="${SOUT_DIR:-/home/joanapasquali/Sout}"
 
-TRAIN_SCRIPT="${SCRIPT_DIR}/sapt.sh"
+TRAIN_SCRIPT="${REPO_ROOT}/scripts/sapt.sh"
 
-echo "FIXED_REPO   : ${FIXED_REPO}"
+echo "REPO_ROOT    : ${REPO_ROOT}"
 echo "PYTHON_BIN   : ${PYTHON_BIN}"
 echo "TRAIN_SCRIPT : ${TRAIN_SCRIPT}"
+echo "SOUT_DIR     : ${SOUT_DIR}"
 echo "RUN_SUFFIX   : ${RUN_SUFFIX:-full}"
 echo "ONLY_INITS   : ${ONLY_INITS:-(all)}"
 echo "=========================================="
@@ -55,14 +56,13 @@ for seq_gpu in "NI-Seq-G2:0" "TRACE:1" "NI-Seq-Opposite-v4:2"; do
     seq="${seq_gpu%%:*}"
     gpu="${seq_gpu##*:}"
     log_safe="$(echo "${seq}" | tr '[:upper:]-' '[:lower:]_')"
-    log_file="${FIXED_REPO}/logs/train_${log_safe}_gpu${gpu}.log"
-    mkdir -p "${FIXED_REPO}/logs"
+    log_file="${SOUT_DIR}/${SLURM_JOB_ID}_train_${log_safe}.out"
 
     echo "[$(date +%H:%M:%S)] Launching  seq=${seq}  GPU=${gpu}  log=${log_file}"
 
     SEQUENCES="${seq}" \
     GPU="${gpu}" \
-    FIXED_REPO="${FIXED_REPO}" \
+    REPO_ROOT="${REPO_ROOT}" \
     PYTHON_BIN="${PYTHON_BIN}" \
     FAIL_FAST="${FAIL_FAST:-0}" \
         bash "${TRAIN_SCRIPT}" "$@" > "${log_file}" 2>&1 &
@@ -78,7 +78,7 @@ for seq in "NI-Seq-G2" "TRACE" "NI-Seq-Opposite-v4"; do
     if wait "${pid}"; then
         echo "[$(date +%H:%M:%S)] OK    ${seq}"
     else
-        echo "[$(date +%H:%M:%S)] FAIL  ${seq}  (see ${FIXED_REPO}/logs/)" >&2
+        echo "[$(date +%H:%M:%S)] FAIL  ${seq}  (see ${SOUT_DIR}/${SLURM_JOB_ID}_train_*.out)" >&2
         EXIT=1
     fi
 done
@@ -87,7 +87,7 @@ echo "=========================================="
 if [[ "${EXIT}" -eq 0 ]]; then
     echo "All sequences completed successfully."
 else
-    echo "One or more sequences failed — check logs in ${FIXED_REPO}/logs/"
+    echo "One or more sequences failed — check per-sequence logs in ${SOUT_DIR}/"
 fi
 echo "=========================================="
 exit "${EXIT}"

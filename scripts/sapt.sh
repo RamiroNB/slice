@@ -6,7 +6,7 @@ set -euo pipefail
 # Inits × SAPT:
 #   lora_vanilla, loram, lora_ga, slice_cagrad_050, slice_cagrad_075
 #
-# Runs the fixed orchestrator from FIXED_REPO so per-stage router snapshots
+# Runs the fixed orchestrator from REPO_ROOT so per-stage router snapshots
 # (router_stage_NN.pt) are written at every stage. This enables correct
 # full-matrix AP when eval_trace.sh later evaluates these runs.
 # Results and checkpoints land in cl-baselines/cl-lora/ as usual.
@@ -27,7 +27,7 @@ set -euo pipefail
 #   SEQUENCES           space-separated list (default: all three)
 #   ONLY_INITS          restrict to subset of init tags (default: all)
 #   FAIL_FAST           stop on first failure, 0 to disable (default: 1)
-#   FIXED_REPO          repo with fixed orchestrator (default: /mnt/E-SSD/fix-cl-lora/cl-lora)
+#   REPO_ROOT           repo root (default: /home/joanapasquali/cl-lora)
 #   PYTHON_BIN          python binary (default: cl-lora conda env)
 #   SLICE_MAX_STEPS     steps for slice/lora_ga/loram init (default: 100)
 #   SAPT_KEY_DIM        router key dimension (default: 64)
@@ -43,16 +43,13 @@ RUN_PREFIX="${RUN_PREFIX:-compose}"
 RUN_SUFFIX="${RUN_SUFFIX:-full}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-THIS_REPO="$(cd "${SCRIPT_DIR}/.." && pwd)"
-FIXED_REPO="${FIXED_REPO:-/mnt/E-SSD/fix-cl-lora/cl-lora}"
-PYTHON_BIN="${PYTHON_BIN:-/mnt/E-SSD/jmpasquali/cache/conda/envs/cl-lora/bin/python}"
+REPO_ROOT="${REPO_ROOT:-/home/joanapasquali/cl-lora}"
+PYTHON_BIN="${PYTHON_BIN:-$(conda run -n "${CONDA_ENV:-cl_lora}" which python)}"
 
-# Absolute output dirs so results land in cl-baselines regardless of cwd.
-OUTPUT_ROOT="${THIS_REPO}/results"
-TRAIN_OUTPUT_ROOT="${THIS_REPO}/outputs"
-BASE_MODEL_CACHE="${THIS_REPO}/outputs/base_models"
-SLICE_CACHE_DIR="${THIS_REPO}/slice_cache"
+OUTPUT_ROOT="${REPO_ROOT}/results"
+TRAIN_OUTPUT_ROOT="${REPO_ROOT}/outputs"
+BASE_MODEL_CACHE="${REPO_ROOT}/outputs/base_models"
+SLICE_CACHE_DIR="${REPO_ROOT}/slice_cache"
 
 SEQUENCES_RAW="${SEQUENCES:-NI-Seq-G2 TRACE NI-Seq-Opposite-v4}"
 read -r -a SEQUENCES <<< "${SEQUENCES_RAW}"
@@ -143,8 +140,8 @@ INITS=(lora_vanilla loram lora_ga slice_cagrad_050 slice_cagrad_075)
 # ---------------------------------------------------------------------------
 # Validate env before queuing any work.
 # ---------------------------------------------------------------------------
-if [[ ! -d "${FIXED_REPO}/cl_lora/sapt" ]]; then
-    echo "FIXED_REPO does not look like a cl-lora checkout: ${FIXED_REPO}" >&2
+if [[ ! -d "${REPO_ROOT}/cl_lora/sapt" ]]; then
+    echo "REPO_ROOT does not look like a cl-lora checkout: ${REPO_ROOT}" >&2
     exit 1
 fi
 
@@ -153,7 +150,7 @@ echo "SAPT full training sweep"
 echo "Sequences    : ${SEQUENCES[*]}"
 echo "Inits        : ${INITS[*]}"
 echo "GPU          : ${GPU}  | Rank: ${RANK}"
-echo "Fixed repo   : ${FIXED_REPO}"
+echo "Fixed repo   : ${REPO_ROOT}"
 echo "Output root  : ${OUTPUT_ROOT}"
 echo "Train root   : ${TRAIN_OUTPUT_ROOT}"
 echo "Base cache   : ${BASE_MODEL_CACHE}"
@@ -190,9 +187,9 @@ run_combo() {
     echo "Run name   : ${run_name}"
     echo "============================================================"
 
-    # cd into FIXED_REPO so the patched cl_lora package (with per-stage router
+    # cd into REPO_ROOT so the patched cl_lora package (with per-stage router
     # snapshots) is used for training. Output paths are absolute.
-    cd "${FIXED_REPO}"
+    cd "${REPO_ROOT}"
 
     CUDA_VISIBLE_DEVICES="${GPU}" \
         "${PYTHON_BIN}" -m cl_lora.orchestrator \
