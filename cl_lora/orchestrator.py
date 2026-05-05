@@ -244,6 +244,7 @@ def run_sequence(
     slice_nullspace_sv_threshold: float = 0.0,
     slice_svd_selection: str = "lora_ga",
     keep_all_checkpoints: bool = False,
+    save_intermediate_checkpoints: bool = False,
     general_eval_strategy: str = "every_stage",
     seen_eval_strategy: str = "full_matrix",
     train_only: bool = False,
@@ -285,6 +286,7 @@ def run_sequence(
         "slice_single_retain_task_mode": slice_single_retain_task_mode,
         "slice_init_method": slice_init_method,
         "keep_all_checkpoints": keep_all_checkpoints,
+        "save_intermediate_checkpoints": save_intermediate_checkpoints,
         "general_eval_strategy": general_eval_strategy,
         "seen_eval_strategy": seen_eval_strategy,
         "cl_method": str(cl_method_name),
@@ -485,6 +487,7 @@ def run_sequence(
             slice_retain_grad_accum=slice_retain_grad_accum,
             slice_retain_batch_size_set=slice_retain_batch_size_set,
             slice_single_retain_task_mode=slice_single_retain_task_mode,
+            save_intermediate_checkpoints=save_intermediate_checkpoints,
             slice_init_method=slice_init_method,
             slice_projection_method=slice_projection_method,
             slice_cosine_threshold=slice_cosine_threshold,
@@ -825,6 +828,9 @@ def main() -> None:
         help="How many training prompts to cache per task for ARM seeding.")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
         help="Keep all intermediate stage checkpoints. By default only the latest is kept.")
+    parser.add_argument("--save-checkpoints", action="store_true",
+        help="Save intermediate HuggingFace Trainer checkpoints (checkpoint-N dirs) during training. "
+             "By default only the final adapter is saved to results.")
     parser.add_argument("--general-eval-strategy", choices=["every_stage", "final_only"],
         default="every_stage",
         help="When to run general (GP/IP) eval. 'final_only' skips it at intermediate stages.")
@@ -927,6 +933,7 @@ def main() -> None:
         slice_nullspace_sv_threshold=args.slice_nullspace_sv_threshold,
         slice_svd_selection=args.slice_svd_selection,
         keep_all_checkpoints=args.keep_all_checkpoints,
+        save_intermediate_checkpoints=args.save_checkpoints,
         general_eval_strategy=args.general_eval_strategy,
         seen_eval_strategy=args.seen_eval_strategy,
         train_only=args.train_only,
