@@ -28,7 +28,6 @@ set -euo pipefail
 #   ONLY_INITS          restrict to subset of init tags (default: all)
 #   FAIL_FAST           stop on first failure, 0 to disable (default: 1)
 #   REPO_ROOT           repo root (default: /home/joanapasquali/cl-lora)
-#   PYTHON_BIN          python binary (default: cl-lora conda env)
 #   SLICE_MAX_STEPS     steps for slice/lora_ga/loram init (default: 100)
 #   SAPT_KEY_DIM        router key dimension (default: 64)
 #   SAPT_ARM_N_SAMPLES  pseudo-samples per task for ARM (default: 64)
@@ -43,8 +42,7 @@ RUN_PREFIX="${RUN_PREFIX:-compose}"
 RUN_SUFFIX="${RUN_SUFFIX:-full}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-REPO_ROOT="${REPO_ROOT:-/home/joanapasquali/cl-lora}"
-PYTHON_BIN="${PYTHON_BIN:-$(conda run -n "${CONDA_ENV:-cl_lora}" which python)}"
+REPO_ROOT="${REPO_ROOT:-/mnt/E-SSD/fix-cl-lora/cl-lora/}"
 
 OUTPUT_ROOT="${REPO_ROOT}/results"
 TRAIN_OUTPUT_ROOT="${REPO_ROOT}/outputs"
@@ -69,7 +67,7 @@ SAPT_ARM_N_SAMPLES="${SAPT_ARM_N_SAMPLES:-64}"
 SAPT_ARM_MAX_NEW_TOKENS="${SAPT_ARM_MAX_NEW_TOKENS:-32}"
 SAPT_ARM_MAX_INPUT_LENGTH="${SAPT_ARM_MAX_INPUT_LENGTH:-128}"
 SAPT_ARM_N_EPOCHS="${SAPT_ARM_N_EPOCHS:-3}"
-SAPT_ARM_BATCH_SIZE="${SAPT_ARM_BATCH_SIZE:-4}"
+SAPT_ARM_BATCH_SIZE="${SAPT_ARM_BATCH_SIZE:-8}"
 SAPT_ARM_LR="${SAPT_ARM_LR:-1e-4}"
 SAPT_SEED_PROMPTS="${SAPT_SEED_PROMPTS:-32}"
 
@@ -201,7 +199,7 @@ run_combo() {
     cd "${REPO_ROOT}"
 
     CUDA_VISIBLE_DEVICES="${GPU}" \
-        "${PYTHON_BIN}" -m cl_lora.orchestrator \
+        python -m cl_lora.orchestrator \
             --sequence             "${sequence_name}" \
             --run-name             "${run_name}" \
             --rank                 "${RANK}" \
