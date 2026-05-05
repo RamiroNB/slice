@@ -44,6 +44,10 @@ ROOTS = [
     Path("imported_results"),
     Path("imported_results_pending"),
     Path("/mnt/E-SSD/dev-cl-lora/cl-lora/results"),
+    Path("/mnt/D-SSD/cl-lora-ramiro/results"),
+    Path("/mnt/E-SSD/joana-ramiro/all_results/opposing_seqs_commit_42175dc"),
+    Path("/mnt/E-SSD/cl-baselines/cl-lora/results/NI-Seq-G2/basic_methods"),
+    Path("/mnt/B-SSD/jmpasquali/fix-cl-lora/cl-lora/results"),
 ]
 
 BENCHMARK_SHORT = {
@@ -54,6 +58,11 @@ BENCHMARK_SHORT = {
     "openbookqa":         "OpenBookQA",
     "lambada":            "Lambada",
 }
+
+# Directories inside a root that are grouping dirs, not sequence dirs.
+# Entries with these names are scanned for run_config-bearing method subdirs,
+# but the dir name itself is never used as a fallback sequence name.
+_NON_SEQ_DIRS = {"completed", "vanilla_baseline", "ignore_for_now", "base_model"}
 
 # GP and IP exclude BBH zero-shot since it's broken for existing data
 GP_EXCLUDE = {"bbh_object_counting"}
@@ -145,55 +154,44 @@ def collect_runs_for_seq(seq_name: str | None, method_filter: list[str] | None) 
             seen[key] = {"method": method, "seq": resolved_seq, "records": records,
                          "matrix": matrix, "run_dir": run_dir}
 
+    def _infer_seq(d: Path) -> str | None:
+        """Read seq from run_config.json / run_summary.json inside dir d."""
+        for cfg_name in ("run_config.json", "run_summary.json"):
+            cfg_path = d / cfg_name
+            if cfg_path.exists():
+                try:
+                    with cfg_path.open() as f:
+                        cfg = json.load(f)
+                    return (cfg.get("orchestrator", {}).get("cli_args", {}).get("sequence")
+                            or cfg.get("sequence"))
+                except Exception:
+                    pass
+                break
+        return None
+
     for root in ROOTS:
         if not root.exists():
             continue
         for entry in sorted(root.iterdir()):
             if not entry.is_dir():
                 continue
-            # 2-level: root/<seq>/<method>
-            is_seq_match = (seq_name is None or entry.name == seq_name)
-            if is_seq_match and not (entry / "stages").exists() and not (entry / "metrics.json").exists():
-                for method_dir in sorted(entry.iterdir()):
-                    if method_dir.is_dir():
-                        _consider(method_dir, entry.name)
-            # flat: root/<method> — infer seq from run_config or run_summary
-            elif (entry / "stages").exists():
-                for cfg_name in ("run_config.json", "run_summary.json"):
-                    cfg_path = entry / cfg_name
-                    if cfg_path.exists():
-                        try:
-                            with cfg_path.open() as f:
-                                cfg = json.load(f)
-                            inferred = (
-                                cfg.get("orchestrator", {}).get("cli_args", {}).get("sequence")
-                                or cfg.get("sequence")
-                            )
-                            if inferred:
-                                _consider(entry, inferred)
-                        except Exception:
-                            pass
-                        break
-            # completed/ flat layout
-            elif entry.name == "completed":
+            if (entry / "stages").exists():
+                # Flat layout: entry itself is a run dir
+                inferred = _infer_seq(entry)
+                if inferred:
+                    _consider(entry, inferred)
+            else:
+                # entry is either a seq dir (root/<seq>/<method>) or a grouping dir
+                # (root/completed/<method>, root/vanilla_baseline/<method>).
+                # Always infer seq from run_config; fall back to entry.name for
+                # seq dirs whose method subdirs lack a config file.
                 for method_dir in sorted(entry.iterdir()):
                     if not method_dir.is_dir():
                         continue
-                    for cfg_name in ("run_config.json", "run_summary.json"):
-                        cfg_path = method_dir / cfg_name
-                        if cfg_path.exists():
-                            try:
-                                with cfg_path.open() as f:
-                                    cfg = json.load(f)
-                                inferred = (
-                                    cfg.get("orchestrator", {}).get("cli_args", {}).get("sequence")
-                                    or cfg.get("sequence")
-                                )
-                                if inferred:
-                                    _consider(method_dir, inferred)
-                            except Exception:
-                                pass
-                            break
+                    inferred = _infer_seq(method_dir)
+                    if inferred is None and entry.name in _NON_SEQ_DIRS:
+                        continue  # skip runs without config inside grouping dirs
+                    _consider(method_dir, inferred or entry.name)
 
     return list(seen.values())
 

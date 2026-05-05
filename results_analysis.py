@@ -54,6 +54,7 @@ SYNC_FILES           = ["metrics.json", "results_matrix.json", "run_config.json"
 SYNC_STAGE_RECORDS   = True
 
 RANK128_RESULTS = Path("/mnt/D-SSD/cl-lora-ramiro/results")
+B_SSD_RESULTS   = Path("/mnt/B-SSD/jmpasquali/fix-cl-lora/cl-lora/results")
 CL_BASELINES_ROOTS = [
     Path("/mnt/E-SSD/cl-baselines/cl-lora/results/TRACE/basic_methods"),
     Path("/mnt/E-SSD/cl-baselines/cl-lora/results/NI-Seq-G2/basic_methods"),
@@ -734,7 +735,7 @@ def parse_args():
     p.add_argument("--no-analyse", action="store_true",
                    help="Skip analysis (useful with --sync to only fetch data)")
     p.add_argument("--roots", nargs="+",
-                   default=["imported_results", str(PENDING_EVAL_LOCAL), str(MOTOX_RESULTS)],
+                   default=["imported_results", str(PENDING_EVAL_LOCAL), str(MOTOX_RESULTS), str(B_SSD_RESULTS)],
                    help="Local folders to scan for results (tagged as r64)")
     p.add_argument("--rank128-root", type=Path, default=RANK128_RESULTS,
                    help="Root dir for rank-128 results (tagged as r128); set to '' to disable")

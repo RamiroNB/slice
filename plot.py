@@ -45,8 +45,8 @@ SEQ_RENAME = {
 # Preferred sequence display order (sequences not listed are appended alphabetically).
 SEQ_ORDER = ["G1", "G2", "Opp-v2", "Opp-v3", "Opp-v4", "TRACE"]
 
-# Sequence to use for the single-sequence scatter plot (plot 3).
-HIGHLIGHT_SEQ = "G1"
+# Sequences to generate individual scatter plots for (plot 3).
+HIGHLIGHT_SEQS = ["G1", "G2", "TRACE", "Opp-v4"]
 
 # Selected SLICE variants: key must be a substring of the method name in the CSV.
 # Longer keys are tried before shorter ones to avoid ambiguous matches.
@@ -328,16 +328,18 @@ def plot_scatter_all_variants():
 # ============================================================
 # Plot 3: single sequence highlight
 # ============================================================
-def plot_highlight_seq():
-    seq = HIGHLIGHT_SEQ
-    hl_selected = {k: v[seq] for k, v in selected_slice.items() if seq in v}
-    hl_base     = {k: v[seq] for k, v in baselines.items()      if seq in v}
+def plot_highlight_seq(seq: str, slice_keys: list[str] | None = None):
+    src = {k: v for k, v in selected_slice.items()
+           if slice_keys is None or k in slice_keys}
+    hl_selected = {k: v[seq] for k, v in src.items() if seq in v}
+    hl_base     = {k: v[seq] for k, v in baselines.items() if seq in v}
 
     if not hl_selected and not hl_base:
         print(f"  [skip] highlight seq '{seq}' not found in loaded data")
         return
 
-    fig, ax = plt.subplots(figsize=(7, 6))
+    # fig, ax = plt.subplots(figsize=(7, 6))
+    fig, ax = plt.subplots(figsize=(6, 4))
     add_diagonal_and_regions(ax)
     ax.text(0.42, 0.435, "FP = AP", fontsize=9, color="gray",
             rotation=42, va="bottom")
@@ -371,7 +373,7 @@ def plot_highlight_seq():
     ax.set_xlabel("AP (plasticity) — higher is better", fontsize=11)
     ax.set_ylabel("FP (stability) — higher is better", fontsize=11)
     ax.set_title(f"Stability vs Plasticity — {seq}", fontsize=13, fontweight="bold")
-    ax.set_xlim(0.10, 0.45); ax.set_ylim(0.00, 0.40)
+    ax.set_xlim(0.00, 0.40); ax.set_ylim(0.00, 0.40)
     ax.grid(True, color="gray", linewidth=0.25, alpha=0.4)
 
     handles = [
@@ -787,7 +789,15 @@ def _run_all_plots(rank_label: str) -> None:
     print(f"\nGenerating plots for rank={rank_label} ...")
     plot_scatter_selected();    print("  [1/8] cl_scatter_selected")
     plot_scatter_all_variants();print("  [2/8] cl_scatter_all_variants")
-    plot_highlight_seq();       print(f"  [3/8] cl_scatter_{HIGHLIGHT_SEQ}")
+    for _seq in HIGHLIGHT_SEQS:
+        if _seq in SEQUENCES:
+            plot_highlight_seq(_seq); print(f"  [3/8] cl_scatter_{_seq}")
+        else:
+            print(f"  [3/8] skip cl_scatter_{_seq} (not in data)")
+    if "Opp-v2" in SEQUENCES:
+        plot_highlight_seq("Opp-v2",
+                           slice_keys=["cagrad_c050", "cagrad_c075", "basic_lora_ga"])
+        print("  [3b] cl_scatter_Opp-v2")
     plot_relative_gain();       print("  [4/8] cl_relative_gain")
     plot_skill_score();         print("  [5/8] cl_skill_score")
     plot_radar();               print("  [6/8] cl_radar")
