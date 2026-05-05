@@ -37,7 +37,7 @@ set -euo pipefail
 #   SAPT_ARM_LR         ARM AdamW learning rate (default: 1e-3)
 #   SAPT_SEED_PROMPTS   seed prompts cached per task (default: 32)
 
-GPU="${GPU:-0}"
+GPU="${GPU:-4}"
 RANK="${RANK:-64}"
 RUN_PREFIX="${RUN_PREFIX:-compose}"
 RUN_SUFFIX="${RUN_SUFFIX:-full}"
@@ -51,7 +51,7 @@ TRAIN_OUTPUT_ROOT="${REPO_ROOT}/outputs"
 BASE_MODEL_CACHE="${REPO_ROOT}/outputs/base_models"
 SLICE_CACHE_DIR="${REPO_ROOT}/slice_cache"
 
-SEQUENCES_RAW="${SEQUENCES:-NI-Seq-G2 TRACE NI-Seq-Opposite-v4}"
+SEQUENCES_RAW="${SEQUENCES:-NI-Seq-Opposite-v2}"
 read -r -a SEQUENCES <<< "${SEQUENCES_RAW}"
 
 ONLY_INITS_RAW="${ONLY_INITS:-}"
@@ -70,7 +70,7 @@ SAPT_ARM_MAX_NEW_TOKENS="${SAPT_ARM_MAX_NEW_TOKENS:-32}"
 SAPT_ARM_MAX_INPUT_LENGTH="${SAPT_ARM_MAX_INPUT_LENGTH:-128}"
 SAPT_ARM_N_EPOCHS="${SAPT_ARM_N_EPOCHS:-3}"
 SAPT_ARM_BATCH_SIZE="${SAPT_ARM_BATCH_SIZE:-4}"
-SAPT_ARM_LR="${SAPT_ARM_LR:-1e-3}"
+SAPT_ARM_LR="${SAPT_ARM_LR:-1e-4}"
 SAPT_SEED_PROMPTS="${SAPT_SEED_PROMPTS:-32}"
 
 SAPT_FLAGS=(
@@ -123,6 +123,15 @@ init_flags() {
                   --slice-grad-projection-mode global \
                   --slice-retain-batch-size-set each_task"
             ;;
+        slice_basic)
+            echo "--slice-init --slice-init-method slice \
+                  --slice-cache-dir ${SLICE_CACHE_DIR} \
+                  --slice-max-steps ${SLICE_MAX_STEPS} \
+                  --slice-grad-project \
+                  --slice-grad-projection-mode global \
+                  --slice-retain-batch-size-set each_task \
+                  --slice-svd-selection lora_ga"
+            ;;
         *)
             echo "unknown init: $1" >&2; return 2 ;;
     esac
@@ -135,7 +144,7 @@ filter_match() {
     return 1
 }
 
-INITS=(lora_vanilla loram lora_ga slice_cagrad_050 slice_cagrad_075)
+INITS=(lora_vanilla loram lora_ga slice_basic slice_cagrad_050 slice_cagrad_075)
 
 # ---------------------------------------------------------------------------
 # Validate env before queuing any work.
