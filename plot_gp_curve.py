@@ -44,10 +44,10 @@ ROOTS = [
     Path("imported_results"),
     Path("imported_results_pending"),
     Path("/mnt/E-SSD/dev-cl-lora/cl-lora/results"),
-    Path("/mnt/D-SSD/cl-lora-ramiro/results"),
-    Path("/mnt/E-SSD/joana-ramiro/all_results/opposing_seqs_commit_42175dc"),
+    Path("/mnt/D-SSD/cl-lora-user/results"),
+    Path("/mnt/E-SSD/user/all_results/opposing_seqs_commit_42175dc"),
     Path("/mnt/E-SSD/cl-baselines/cl-lora/results/NI-Seq-G2/basic_methods"),
-    Path("/mnt/B-SSD/jmpasquali/fix-cl-lora/cl-lora/results"),
+    Path("/mnt/B-SSD/user/fix-cl-lora/cl-lora/results"),
 ]
 
 BENCHMARK_SHORT = {

@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=cl_lora_lean
-#SBATCH --output=/home/joanapasquali/Sout/%j%x.out
-#SBATCH --error=/home/joanapasquali/Sout/%j%x.out
+#SBATCH --output=/home/user/Sout/%j%x.out
+#SBATCH --error=/home/user/Sout/%j%x.out
 
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
@@ -10,7 +10,7 @@
 #SBATCH --time=2-00:00:00
 #SBATCH --gpus=3
 
-# CIARS SLURM driver for the memory-economy LoRA × CL-method sweep.
+# SLURM driver for the memory-economy LoRA × CL-method sweep.
 #
 # Wraps scripts/test_init_x_cl_methods_lean.sh. Pins one init group per GPU
 # so concurrent workers cannot race on the same slice_cache/<key> entry
@@ -19,8 +19,8 @@
 # model cache is process-safe via atomic rename, so all GPUs may share it.
 #
 # Override env vars from the sbatch command line, e.g.:
-#   sbatch --export=ALL,SEQUENCES="NI-Seq-G2 TRACE",RUN_SUFFIX=ciars01 \
-#          scripts/ciars_lean_sweep.sh
+#   sbatch --export=ALL,SEQUENCES="NI-Seq-G2 TRACE",RUN_SUFFIX=01 \
+#          scripts/lean_sweep.sh
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ echo "Starting the execution"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TOKENIZERS_PARALLELISM="false"
 
-REPO_ROOT="${REPO_ROOT:-/home/joanapasquali/cl-lora}"
+REPO_ROOT="${REPO_ROOT:-/home/user/cl-lora}"
 CONDA_ENV="${CONDA_ENV:-cl_lora}"
 
 cd "${REPO_ROOT}"
@@ -52,7 +52,7 @@ SEQUENCES_RAW="${SEQUENCES:-NI-Seq-G2}"
 INITS_RAW="${ONLY_INITS:-lora_vanilla loram lora_ga slice}"
 ONLY_CL_RAW="${ONLY_CL:-o_lora inflora sapt}"
 RUN_PREFIX="${RUN_PREFIX:-compose}"
-RUN_SUFFIX="${RUN_SUFFIX:-ciars}"
+RUN_SUFFIX="${RUN_SUFFIX:-cluster}"
 RANK="${RANK:-32}"
 SLICE_MAX_STEPS="${SLICE_MAX_STEPS:-8}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
@@ -61,7 +61,7 @@ LOG_LEVEL="${LOG_LEVEL:-INFO}"
 NGPU="${NGPU:-${SLURM_GPUS:-${SLURM_GPUS_ON_NODE:-3}}}"
 
 # Where per-GPU stdout/stderr logs land.
-LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/ciars/${SLURM_JOB_ID:-local}}"
+LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/cluster/${SLURM_JOB_ID:-local}}"
 mkdir -p "${LOG_DIR}"
 
 read -r -a INITS <<< "${INITS_RAW}"

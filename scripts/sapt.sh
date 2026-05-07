@@ -27,7 +27,7 @@ set -euo pipefail
 #   SEQUENCES           space-separated list (default: all three)
 #   ONLY_INITS          restrict to subset of init tags (default: all)
 #   FAIL_FAST           stop on first failure, 0 to disable (default: 1)
-#   REPO_ROOT           repo root (default: /home/joanapasquali/cl-lora)
+#   REPO_ROOT           repo root (default: /home/user/cl-lora)
 #   SLICE_MAX_STEPS     steps for slice/lora_ga/loram init (default: 100)
 #   SAPT_KEY_DIM        router key dimension (default: 64)
 #   SAPT_ARM_N_SAMPLES  pseudo-samples per task for ARM (default: 64)

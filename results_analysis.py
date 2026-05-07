@@ -1,8 +1,7 @@
 """
 Sync finished CL-LoRA runs from remote machines and analyse results.
 
-SSH aliases "cristian" and "rafa" must be defined in ~/.ssh/config.
-Both route through sparta.pucrs.br as a jump host, so two passwords are
+SSH aliases "user" and "user" must be defined in ~/.ssh/config.
 
 Remote layout:  /work/cl-lora/adaptors_eval/<seq_name>/<method>/
 Local layout:   ./imported_results/<seq_name>/<method>/
@@ -41,24 +40,24 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 # SSH aliases as defined in ~/.ssh/config — no host/user needed here.
-REMOTES = ["cristian", "rafa"]
+REMOTES = ["user"]
 
 REMOTE_BASE        = "~/work/cl-lora/adaptors_eval"
 LOCAL_BASE         = Path("imported_results")
-MOTOX_RESULTS      = Path("/mnt/E-SSD/dev-cl-lora/cl-lora/results")
-PENDING_EVAL_REMOTES = ["cristian", "rafa"]   # machines running pending_eval
+LOCAL_RESULTS      = Path("/mnt/E-SSD/dev-cl-lora/cl-lora/results")
+PENDING_EVAL_REMOTES = ["user", "user"]   # machines running pending_eval
 PENDING_EVAL_PATH    = "~/work/cl-lora/pending_eval"
 PENDING_EVAL_LOCAL   = Path("imported_results_pending")
 SYNC_FILES           = ["metrics.json", "results_matrix.json", "run_config.json", "run_summary.json"]
 # stage_record.json files under stages/stage_*/ carry per-benchmark GP/IP breakdowns
 SYNC_STAGE_RECORDS   = True
 
-RANK128_RESULTS = Path("/mnt/D-SSD/cl-lora-ramiro/results")
-B_SSD_RESULTS   = Path("/mnt/B-SSD/jmpasquali/fix-cl-lora/cl-lora/results")
+RANK128_RESULTS = Path("/mnt/D-SSD/cl-lora-user/results")
+B_SSD_RESULTS   = Path("/mnt/B-SSD/user/fix-cl-lora/cl-lora/results")
 CL_BASELINES_ROOTS = [
     Path("/mnt/E-SSD/cl-baselines/cl-lora/results/TRACE/basic_methods"),
     Path("/mnt/E-SSD/cl-baselines/cl-lora/results/NI-Seq-G2/basic_methods"),
-    Path("/mnt/E-SSD/joana-ramiro/all_results/opposing_seqs_commit_42175dc/NI-Seq-G1"),
+    Path("/mnt/E-SSD/user/all_results/opposing_seqs_commit_42175dc/NI-Seq-G1"),
 ]
 
 METRICS = ["AP", "FP", "GP", "IP", "Forget"]
@@ -105,7 +104,7 @@ def open_control_master(alias: str, verbose: bool = False) -> bool:
         alias,
     ]
     print(f"  $ {' '.join(cmd)}")
-    print(f"  (type your password for sparta when prompted)")
+    print(f"  (type your password for {alias} when prompted)")
     result = subprocess.run(cmd)  # stdin/stderr flow to terminal for password prompt
     if result.returncode != 0:
         print(f"  [error] ControlMaster for {alias!r} failed (exit {result.returncode})")
@@ -264,7 +263,7 @@ def sync_all(verbose: bool = False) -> None:
     print("\n=== Syncing from remote machines ===")
     all_aliases = sorted(set(REMOTES) | set(PENDING_EVAL_REMOTES))
     for alias in all_aliases:
-        print(f"\n[{alias}] opening connection (you will be prompted for the sparta password) ...")
+        print(f"\n[{alias}] opening connection (you will be prompted for the password) ...")
         if not open_control_master(alias, verbose=verbose):
             continue
         try:
@@ -735,7 +734,7 @@ def parse_args():
     p.add_argument("--no-analyse", action="store_true",
                    help="Skip analysis (useful with --sync to only fetch data)")
     p.add_argument("--roots", nargs="+",
-                   default=["imported_results", str(PENDING_EVAL_LOCAL), str(MOTOX_RESULTS), str(B_SSD_RESULTS)],
+                   default=["imported_results", str(PENDING_EVAL_LOCAL), str(LOCAL_RESULTS), str(B_SSD_RESULTS)],
                    help="Local folders to scan for results (tagged as r64)")
     p.add_argument("--rank128-root", type=Path, default=RANK128_RESULTS,
                    help="Root dir for rank-128 results (tagged as r128); set to '' to disable")

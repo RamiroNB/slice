@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=sapt_train
-#SBATCH --output=/home/joanapasquali/Sout/%j%x.out
-#SBATCH --error=/home/joanapasquali/Sout/%j%x.out
+#SBATCH --output=/home/user/Sout/%j%x.out
+#SBATCH --error=/home/user/Sout/%j%x.out
 
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
@@ -10,14 +10,14 @@
 #SBATCH --time=4-00:00:00
 #SBATCH --gpus=3
 
-# CIARS SLURM driver for the SAPT training sweep (all inits × all sequences).
+# SLURM driver for the SAPT training sweep (all inits × all sequences).
 #
 # Runs sapt.sh (5 inits, fully sequential) on each of 3 sequences in parallel,
 # one sequence per GPU (NI-Seq-G2 → GPU 0, TRACE → GPU 1, v4 → GPU 2).
 # Results land in <REPO_ROOT>/results/, outputs in <REPO_ROOT>/outputs/.
 #
 # Override env vars from the sbatch command line, e.g.:
-#   sbatch --export=ALL,RUN_SUFFIX=ciars01,ONLY_INITS="lora_vanilla loram" \
+#   sbatch --export=ALL,RUN_SUFFIX=cluster01,ONLY_INITS="lora_vanilla loram" \
 #          scripts/train_sapt.sh
 
 set -euo pipefail
@@ -36,9 +36,9 @@ conda activate "${CONDA_ENV}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
-REPO_ROOT="${REPO_ROOT:-/home/joanapasquali/cl-lora}"
+REPO_ROOT="${REPO_ROOT:-/home/user/cl-lora}"
 PYTHON_BIN="${PYTHON_BIN:-$(conda run -n "${CONDA_ENV}" which python)}"
-SOUT_DIR="${SOUT_DIR:-/home/joanapasquali/Sout}"
+SOUT_DIR="${SOUT_DIR:-/home/user/Sout}"
 
 TRAIN_SCRIPT="${REPO_ROOT}/scripts/sapt.sh"
 

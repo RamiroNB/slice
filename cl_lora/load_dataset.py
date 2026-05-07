@@ -82,7 +82,7 @@ TRACE_BENCHMARK_DIRS = [
     "LLM-CL-Benchmark_Reasoning",
 ]
 
-DEFAULT_TRACE_ROOT = "/mnt/C-SSD/ramiro/data/TRACE-Benchmark"
+DEFAULT_TRACE_ROOT = "/mnt/C-SSD/user/data/TRACE-Benchmark"
 
 
 def _to_text(value: Any) -> str:
