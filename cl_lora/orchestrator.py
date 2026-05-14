@@ -236,7 +236,7 @@ def run_sequence(
     slice_cosine_threshold: float | None = None,
     slice_per_layer_threshold: bool = False,
     slice_per_layer_threshold_delta: float = 0.0,
-    slice_cagrad_c: float = 0.5,
+    slice_pcgrad_c: float = 0.5,
     slice_gradvac_phi: float = 0.0,
     slice_gradvac_beta: float = 0.5,
     slice_magnitude_preserve: bool = False,
@@ -493,7 +493,7 @@ def run_sequence(
             slice_cosine_threshold=slice_cosine_threshold,
             slice_per_layer_threshold=slice_per_layer_threshold,
             slice_per_layer_threshold_delta=slice_per_layer_threshold_delta,
-            slice_cagrad_c=slice_cagrad_c,
+            slice_pcgrad_c=slice_pcgrad_c,
             slice_gradvac_phi=slice_gradvac_phi,
             slice_gradvac_beta=slice_gradvac_beta,
             slice_magnitude_preserve=slice_magnitude_preserve,
@@ -763,7 +763,7 @@ def main() -> None:
     parser.add_argument("--slice-single-retain-task-mode", action="store_true",
         help="Only use the most recent previous task for retain, with same batch size as current task.")
     parser.add_argument("--slice-projection-method",
-        choices=["pcgrad", "cagrad", "gradvac", "nullspace", "magnitude_preserving"],
+        choices=["pcgrad", "pcgrad_c", "gradvac", "nullspace", "magnitude_preserving"],
         default="pcgrad",
         help="Advanced projection method. 'pcgrad' preserves existing behavior.")
     parser.add_argument("--slice-cosine-threshold", type=float, default=None,
@@ -772,8 +772,8 @@ def main() -> None:
     parser.add_argument("--slice-per-layer-threshold", action="store_true",
         help="Use a per-module threshold computed as median(cos) - delta.")
     parser.add_argument("--slice-per-layer-threshold-delta", type=float, default=0.0)
-    parser.add_argument("--slice-cagrad-c", type=float, default=0.5,
-        help="CAGrad interpolation strength in [0,1].")
+    parser.add_argument("--slice-pcgrad-c", type=float, default=0.5,
+        help="PCGrad_c interpolation strength in [0,1]. c=1 reproduces PCGrad.")
     parser.add_argument("--slice-gradvac-phi", type=float, default=0.0,
         help="GradVac target cosine (initial).")
     parser.add_argument("--slice-gradvac-beta", type=float, default=0.5,
@@ -925,7 +925,7 @@ def main() -> None:
         slice_cosine_threshold=args.slice_cosine_threshold,
         slice_per_layer_threshold=args.slice_per_layer_threshold,
         slice_per_layer_threshold_delta=args.slice_per_layer_threshold_delta,
-        slice_cagrad_c=args.slice_cagrad_c,
+        slice_pcgrad_c=args.slice_pcgrad_c,
         slice_gradvac_phi=args.slice_gradvac_phi,
         slice_gradvac_beta=args.slice_gradvac_beta,
         slice_magnitude_preserve=args.slice_magnitude_preserve,
