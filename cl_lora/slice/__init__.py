@@ -8,7 +8,7 @@ from ..repro import set_global_seed
 def initialize_lora_with_slice(
     model,
     tokenizer,
-    forget_task,
+    current_task,
     retain_tasks,
     *,
     config: SliceInitConfig,
@@ -18,7 +18,7 @@ def initialize_lora_with_slice(
     inits, _cache_root = load_or_compute_slice_inits(
         model=model,
         tokenizer=tokenizer,
-        forget_task=forget_task,
+        current_task=current_task,
         retain_tasks=retain_tasks,
         config=config,
     )

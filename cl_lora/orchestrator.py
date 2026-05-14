@@ -736,7 +736,7 @@ def main() -> None:
         default=2,
         help="LoRA alpha (rsLoRA scaling = alpha / sqrt(r)). Defaults to 2.",
     )
-    parser.add_argument("--slice-grad-project", action="store_true", help="Project forget gradients against retain gradients for slice init.")
+    parser.add_argument("--slice-grad-project", action="store_true", help="Project current-task gradients against retain gradients for slice init.")
     parser.add_argument(
         "--slice-grad-projection-mode",
         choices=["per_module", "global"],
@@ -761,7 +761,7 @@ def main() -> None:
         default="all_tasks",
         help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
     parser.add_argument("--slice-single-retain-task-mode", action="store_true",
-        help="Only use the most recent previous task for retain, with same batch size as forget.")
+        help="Only use the most recent previous task for retain, with same batch size as current task.")
     parser.add_argument("--slice-projection-method",
         choices=["pcgrad", "cagrad", "gradvac", "nullspace", "magnitude_preserving"],
         default="pcgrad",
@@ -790,7 +790,7 @@ def main() -> None:
              "top-r singular vectors without sigma weighting (idea C.16 variant).")
     parser.add_argument("--slice-init-method", choices=["slice", "lora_ga", "loram"],
         default="slice",
-        help="Initialization method: 'slice' (default), 'lora_ga' (SVD on forget gradients only), "
+        help="Initialization method: 'slice' (default), 'lora_ga' (SVD on current-task gradients only), "
              "or 'loram' (DST-based, no gradients).")
     parser.add_argument("--cl-method",
         choices=sorted(CL_METHOD_REGISTRY.keys()),

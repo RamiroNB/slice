@@ -18,7 +18,7 @@ from .cache import (
 )
 from .config import SliceInitConfig
 from .decompose import build_ab_from_gradient, build_ab_loram
-from .gradients import accumulate_gradients, combine_grads, project_forget_gradients
+from .gradients import accumulate_gradients, combine_grads, project_current_gradients
 from .projections import project_gradients_advanced
 from .utils import build_dataloader, model_device, target_weight_params, tokenize_dataset
 
@@ -75,7 +75,7 @@ def compute_loram_inits(
 def compute_slice_inits(
     model: torch.nn.Module,
     tokenizer,
-    forget_task,
+    current_task,
     retain_tasks=None,
     *,
     config: SliceInitConfig,
@@ -99,9 +99,9 @@ def compute_slice_inits(
         retain_tasks = retain_tasks or []
     retain_names = [getattr(rt, "name", str(rt)) for rt in retain_tasks] or None
     logger.info(
-        "Starting slice init (method=%s): forget=%s retain=%s max_steps=%s batch_size=%s",
+        "Starting slice init (method=%s): current=%s retain=%s max_steps=%s batch_size=%s",
         config.init_method,
-        getattr(forget_task, "name", str(forget_task)),
+        getattr(current_task, "name", str(current_task)),
         retain_names,
         config.max_steps,
         config.per_device_batch_size,
@@ -113,29 +113,29 @@ def compute_slice_inits(
         raise RuntimeError("No target modules matched for slice initialization.")
 
     logger.info("Matched %d target weight parameters for slice init", len(target_params))
-    forget_ds, _ = load_training_dataset(task=forget_task, eval_size=1, seed=config.seed)
-    forget_ds = tokenize_dataset(forget_ds, tokenizer=tokenizer, max_length=config.max_seq_length)
-    logger.info("Building forget dataloader: dataset_size=%d batch_size=%d", len(forget_ds), config.per_device_batch_size)
-    forget_loader = build_dataloader(
-        forget_ds,
+    current_ds, _ = load_training_dataset(task=current_task, eval_size=1, seed=config.seed)
+    current_ds = tokenize_dataset(current_ds, tokenizer=tokenizer, max_length=config.max_seq_length)
+    logger.info("Building current-task dataloader: dataset_size=%d batch_size=%d", len(current_ds), config.per_device_batch_size)
+    current_loader = build_dataloader(
+        current_ds,
         tokenizer=tokenizer,
         batch_size=config.per_device_batch_size,
         seed=config.seed,
     )
 
     device = model_device(model)
-    grads_f, steps_f = accumulate_gradients(
+    grads_current, steps_current = accumulate_gradients(
         model=model,
-        dataloader=forget_loader,
+        dataloader=current_loader,
         target_params=target_params,
         device=device,
         max_steps=config.max_steps,
     )
-    logger.info("Collected forget gradients: steps=%d modules=%d", steps_f, len(grads_f))
-    for i, (n, g) in enumerate(grads_f.items()):
+    logger.info("Collected current-task gradients: steps=%d modules=%d", steps_current, len(grads_current))
+    for i, (n, g) in enumerate(grads_current.items()):
         if i >= 5:
             break
-        logger.debug("forget grad sample: module=%s norm=%.6g", n, float(g.norm().item()))
+        logger.debug("current grad sample: module=%s norm=%.6g", n, float(g.norm().item()))
 
     grads_r = None
     steps_r = 0
@@ -199,8 +199,8 @@ def compute_slice_inits(
                 break
             logger.debug("retain grad sample: module=%s norm=%.6g", n, float(g.norm().item()))
 
-    denom_f = max(1, steps_f)
-    grads_f = {k: v / float(denom_f) for k, v in grads_f.items()}
+    denom_c = max(1, steps_current)
+    grads_current = {k: v / float(denom_c) for k, v in grads_current.items()}
     if grads_r is not None:
         denom_r = max(1, steps_r)
         grads_r = {k: v / float(denom_r) for k, v in grads_r.items()}
@@ -224,7 +224,7 @@ def compute_slice_inits(
                 config.magnitude_preserve,
             )
             combined, projection_stats = project_gradients_advanced(
-                grads_forget=grads_f,
+                grads_current=grads_current,
                 grads_retain=grads_r,
                 method=method,
                 cosine_threshold=config.cosine_threshold,
@@ -248,8 +248,8 @@ def compute_slice_inits(
                 config.grad_project_always,
                 config.add_retain_grad,
             )
-            combined, projection_stats = project_forget_gradients(
-                grads_forget=grads_f,
+            combined, projection_stats = project_current_gradients(
+                grads_current=grads_current,
                 grads_retain=grads_r,
                 global_projection=global_projection,
                 always_project=config.grad_project_always,
@@ -259,8 +259,8 @@ def compute_slice_inits(
             projection_stats["applied"] = True
             logger.info("Built projected gradient matrix for %d modules", len(combined))
     elif config.grad_project and grads_r is None:
-        logger.info("grad_project=True but no retain task provided; using forget gradients without projection")
-        combined = grads_f
+        logger.info("grad_project=True but no retain task provided; using current-task gradients without projection")
+        combined = grads_current
         projection_stats = {
             "applied": False,
             "reason": "grad_project_true_but_no_retain_grads",
@@ -269,7 +269,7 @@ def compute_slice_inits(
             "gamma": None,
         }
     else:
-        combined = combine_grads(grads_f, grads_r, config.retain_scale)
+        combined = combine_grads(grads_current, grads_r, config.retain_scale)
         logger.info("Built combined gradient matrix for %d modules (retain_scale=%s)", len(combined), config.retain_scale)
         projection_stats = {
             "applied": False,
@@ -312,7 +312,7 @@ def _task_fingerprint(task_obj) -> Optional[Dict[str, object]]:
 def load_or_compute_slice_inits(
     model: torch.nn.Module,
     tokenizer,
-    forget_task,
+    current_task,
     retain_tasks,
     *,
     config: SliceInitConfig,
@@ -341,7 +341,7 @@ def load_or_compute_slice_inits(
     payload = {
         "init_method": config.init_method,
         "cache_context": config.cache_context,
-        "forget_task": _task_fingerprint(forget_task),
+        "current_task": _task_fingerprint(current_task),
         # Canonicalize LoRA-GA cache identity: retain tasks are ignored by design.
         "retain_tasks": None if is_lora_ga else ([_task_fingerprint(rt) for rt in (retain_tasks or [])] or None),
         "rank": config.rank,
@@ -395,7 +395,7 @@ def load_or_compute_slice_inits(
         inits, projection_stats = compute_slice_inits(
             model=model,
             tokenizer=tokenizer,
-            forget_task=forget_task,
+            current_task=current_task,
             retain_tasks=retain_tasks,
             config=config,
         )

@@ -71,22 +71,22 @@ def accumulate_gradients(
 
 
 def combine_grads(
-    grads_forget: Dict[str, torch.Tensor],
+    grads_current: Dict[str, torch.Tensor],
     grads_retain: Optional[Dict[str, torch.Tensor]],
     retain_scale: float,
 ) -> Dict[str, torch.Tensor]:
     combined: Dict[str, torch.Tensor] = {}
-    for name, g_f in grads_forget.items():
+    for name, g_c in grads_current.items():
         g_r = grads_retain.get(name) if grads_retain is not None else None
         if g_r is None:
-            combined[name] = g_f
+            combined[name] = g_c
         else:
-            combined[name] = g_f - retain_scale * g_r
+            combined[name] = g_c - retain_scale * g_r
     return combined
 
 
-def project_forget_gradients(
-    grads_forget: Dict[str, torch.Tensor],
+def project_current_gradients(
+    grads_current: Dict[str, torch.Tensor],
     grads_retain: Dict[str, torch.Tensor],
     *,
     global_projection: bool = False,
@@ -94,7 +94,7 @@ def project_forget_gradients(
     add_retain_grad: bool = False,
     return_stats: bool = False,
 ) -> Dict[str, torch.Tensor] | Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
-    """Project forget gradients against retain gradients (LInMU-style)."""
+    """Project current-task gradients against retain gradients (LInMU-style)."""
     projected: Dict[str, torch.Tensor] = {}
     eps = 1e-12
     stats: Dict[str, Any] = {
@@ -105,36 +105,36 @@ def project_forget_gradients(
         "modules": {},
     }
 
-    if not grads_forget:
+    if not grads_current:
         if return_stats:
-            stats["status"] = "empty_forget_grads"
+            stats["status"] = "empty_current_grads"
             return projected, stats
         return projected
 
     if not global_projection:
-        for name, g_f in grads_forget.items():
+        for name, g_c in grads_current.items():
             g_r = grads_retain.get(name)
             if g_r is None:
-                projected[name] = g_f
+                projected[name] = g_c
                 stats["modules"][name] = {
                     "status": "missing_retain_grad",
                 }
                 continue
 
-            original_shape = g_f.shape
-            g_f_flat = g_f.float().view(-1).to(torch.float64)
+            original_shape = g_c.shape
+            g_c_flat = g_c.float().view(-1).to(torch.float64)
             g_r_flat = g_r.float().view(-1).to(torch.float64)
 
-            dot = torch.dot(g_f_flat, g_r_flat)
+            dot = torch.dot(g_c_flat, g_r_flat)
             denom = torch.dot(g_r_flat, g_r_flat)
             # OGD-style: always remove the retain-direction component.
             projection_numerator = -dot if always_project else torch.relu(-dot)
             gamma = projection_numerator / (denom + eps)
 
-            g_f_new = (g_f_flat + gamma * g_r_flat).view(original_shape)
+            g_c_new = (g_c_flat + gamma * g_r_flat).view(original_shape)
             if add_retain_grad:
-                g_f_new = g_f_new + g_r.to(device=g_f_new.device, dtype=g_f_new.dtype)
-            projected[name] = g_f_new.to(g_f.dtype)
+                g_c_new = g_c_new + g_r.to(device=g_c_new.device, dtype=g_c_new.dtype)
+            projected[name] = g_c_new.to(g_c.dtype)
             stats["modules"][name] = {
                 "status": "projected",
                 "dot": float(dot.item()),
@@ -142,23 +142,23 @@ def project_forget_gradients(
                 "dot_clipped": float(projection_numerator.item()),
                 "projection_numerator": float(projection_numerator.item()),
                 "gamma": float(gamma.item()),
-                "forget_norm": float(g_f_flat.norm().item()),
+                "current_norm": float(g_c_flat.norm().item()),
                 "retain_norm": float(g_r_flat.norm().item()),
-                "projected_norm": float(g_f_new.float().view(-1).norm().item()),
+                "projected_norm": float(g_c_new.float().view(-1).norm().item()),
             }
     else:
-        first_name = next(iter(grads_forget.keys()))
-        device = grads_forget[first_name].device
+        first_name = next(iter(grads_current.keys()))
+        device = grads_current[first_name].device
         global_dot = torch.tensor(0.0, device=device)
         global_denom = torch.tensor(0.0, device=device)
 
-        for name, g_f in grads_forget.items():
+        for name, g_c in grads_current.items():
             g_r = grads_retain.get(name)
             if g_r is None:
                 continue
-            g_f_flat = g_f.float().view(-1).to(torch.float64)
+            g_c_flat = g_c.float().view(-1).to(torch.float64)
             g_r_flat = g_r.float().view(-1).to(torch.float64)
-            global_dot = global_dot + torch.dot(g_f_flat, g_r_flat)
+            global_dot = global_dot + torch.dot(g_c_flat, g_r_flat)
             global_denom = global_denom + torch.dot(g_r_flat, g_r_flat)
 
         projection_numerator = -global_dot if always_project else torch.relu(-global_dot)
@@ -171,30 +171,30 @@ def project_forget_gradients(
             "gamma": float(gamma.item()),
         }
 
-        for name, g_f in grads_forget.items():
+        for name, g_c in grads_current.items():
             g_r = grads_retain.get(name)
             if g_r is None:
-                projected[name] = g_f
+                projected[name] = g_c
                 stats["modules"][name] = {
                     "status": "missing_retain_grad",
                 }
                 continue
 
-            original_shape = g_f.shape
-            g_f_flat = g_f.float().view(-1).to(torch.float64)
+            original_shape = g_c.shape
+            g_c_flat = g_c.float().view(-1).to(torch.float64)
             g_r_flat = g_r.float().view(-1).to(torch.float64)
-            g_f_new = (g_f_flat + gamma * g_r_flat).view(original_shape)
+            g_c_new = (g_c_flat + gamma * g_r_flat).view(original_shape)
             if add_retain_grad:
-                g_f_new = g_f_new + g_r.to(device=g_f_new.device, dtype=g_f_new.dtype)
-            projected[name] = g_f_new.to(g_f.dtype)
+                g_c_new = g_c_new + g_r.to(device=g_c_new.device, dtype=g_c_new.dtype)
+            projected[name] = g_c_new.to(g_c.dtype)
             stats["modules"][name] = {
                 "status": "projected",
-                "dot": float(torch.dot(g_f_flat, g_r_flat).item()),
+                "dot": float(torch.dot(g_c_flat, g_r_flat).item()),
                 "denom": float(torch.dot(g_r_flat, g_r_flat).item()),
                 "gamma": float(gamma.item()),
-                "forget_norm": float(g_f_flat.norm().item()),
+                "current_norm": float(g_c_flat.norm().item()),
                 "retain_norm": float(g_r_flat.norm().item()),
-                "projected_norm": float(g_f_new.float().view(-1).norm().item()),
+                "projected_norm": float(g_c_new.float().view(-1).norm().item()),
             }
 
     if return_stats:
