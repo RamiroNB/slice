@@ -1,18 +1,11 @@
 # Low-Rank Adapters Initialization via Gradient Surgery for Continual Learning
 
-This repository contains the official, **anonymized** implementation accompanying
-the NeurIPS submission *"Low-Rank Adapters Initialization via Gradient Surgery
-for Continual Learning"* (paper ID withheld for double-blind review). It
-reproduces the SLICE initializer, the LoRA initialization baselines (vanilla
+This repository contains the official implementation accompanying the paper
+[*"Low-Rank Adapters Initialization via Gradient Surgery for Continual Learning"*](https://arxiv.org/abs/2605.12752).
+It reproduces the SLICE initializer, the LoRA initialization baselines (vanilla
 LoRA, LoRA-GA, LoRAM), the optional training-time continual-learning methods
 (O-LoRA, InfLoRA, SAPT), and the adversarial **NI-Seq-Opposite** task
 sequences introduced in the paper.
-
-> **Anonymity notice.** No author names, affiliations, GitHub handles, project
-> pages, or external links that could de-anonymize the authors are included in
-> this repository. All paths and run names are generic. Reviewers should
-> consider all internal scripts and code comments as the authoritative
-> description of the method.
 
 ## Repository Layout
 
@@ -243,15 +236,9 @@ match the formulas in Appendix A of the paper.
 
 ## Pre-trained Models
 
-**No pretrained adapters or full model checkpoints are released with this
-supplementary submission.** Reasons:
-
-1. The supplementary ZIP is capped at 100 MB; a single rank-64 adapter
-   set across 5 stages exceeds that.
-2. Releasing run artifacts could expose internal storage paths and reviewer
-   metadata that risk de-anonymization.
-3. The base model is licensed and must be downloaded directly from the Hugging
-   Face Hub by each reviewer.
+Pre-trained adapters are not included in this repository. The base model must
+be downloaded directly from the Hugging Face Hub (see *Environment Variables*
+above).
 
 ## Results
 
@@ -328,8 +315,20 @@ Defined in [cl_lora/task_sequences.py](cl_lora/task_sequences.py):
 
 ## Contributing
 
-This repository is provided **for review** and reproduction of the paper's
-results. Until the review process completes, no external contributions are
-solicited. After acceptance / decision, the de-anonymized release will adopt a
-permissive open-source license, and contributions will be welcomed through
-issues and pull requests.
+Contributions are welcome through issues and pull requests.
+
+## Citation
+
+If you use this code, please cite:
+
+```bibtex
+@misc{pasquali2026lowrankadaptersinitializationgradient,
+      title={Low-Rank Adapters Initialization via Gradient Surgery for Continual Learning}, 
+      author={Joana Pasquali and Ramiro N. Barros and Arthur S. Bianchessi and Vinícius Conte Turani and João Vitor Boer Abitante and Rafaela Cappelari Ravazio and Christian Mattjie and Otávio Parraga and Lucas S. Kupssinskü and Rodrigo C. Barros},
+      year={2026},
+      eprint={2605.12752},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2605.12752}, 
+}
+```
