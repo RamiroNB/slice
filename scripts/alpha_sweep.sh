@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # rsLoRA alpha sweep: disentangle scale (alpha) from direction (init method)
-# in CL-LoRA. Runs slice_var_global_cagrad_c050 and lora_ga (baseline) at
+# in CL-LoRA. Runs slice_var_global_pcgrad_c_c050 and lora_ga (baseline) at
 # alpha ∈ {1, 4} on NI-Seq-G2, NI-Seq-Opposite-v4, TRACE.
 #
 # The alpha=2 reference points are the existing *_projvariants runs.
@@ -10,7 +10,7 @@ set -euo pipefail
 # Usage:
 #   bash scripts/alpha_sweep.sh
 #   GPU=0 bash scripts/alpha_sweep.sh
-#   ALPHAS="1 4" METHODS="cagrad lora_ga" SEQUENCES="NI-Seq-G2" bash scripts/alpha_sweep.sh
+#   ALPHAS="1 4" METHODS="pcgrad_c lora_ga" SEQUENCES="NI-Seq-G2" bash scripts/alpha_sweep.sh
 #   FAIL_FAST=0 bash scripts/alpha_sweep.sh        # collect failures, do not stop
 #
 # Any extra positional args are forwarded to the orchestrator
@@ -28,7 +28,7 @@ SLICE_GRAD_PROJECTION_MODE="${SLICE_GRAD_PROJECTION_MODE:-global}"
 ALPHAS_RAW="${ALPHAS:-1 2 4}"
 read -r -a ALPHAS <<< "${ALPHAS_RAW}"
 
-METHODS_RAW="${METHODS:-cagrad lora_ga}"
+METHODS_RAW="${METHODS:-pcgrad_c lora_ga}"
 read -r -a METHODS <<< "${METHODS_RAW}"
 
 SEQUENCES_RAW="${SEQUENCES:-NI-Seq-G2 NI-Seq-Opposite-v4 TRACE}"
@@ -37,15 +37,15 @@ read -r -a SEQUENCES <<< "${SEQUENCES_RAW}"
 FAIL_FAST="${FAIL_FAST:-1}"
 EXTRA_ARGS=("$@")
 
-run_cagrad() {
+run_pcgrad_c() {
 	local sequence_name="$1"
 	local alpha="$2"
 	local seq_safe
 	seq_safe="$(echo "${sequence_name}" | tr '[:upper:]-' '[:lower:]_')"
-	local run_name="slice_var_global_cagrad_c050_${seq_safe}_${RUN_SUFFIX}_a${alpha}"
+	local run_name="slice_var_global_pcgrad_c_c050_${seq_safe}_${RUN_SUFFIX}_a${alpha}"
 
 	echo "============================================================"
-	echo "Method    : slice_var_global_cagrad_c050"
+	echo "Method    : slice_var_global_pcgrad_c_c050"
 	echo "Sequence  : ${sequence_name}"
 	echo "Alpha     : ${alpha}    (rsLoRA scale = ${alpha}/sqrt(${RANK}))"
 	echo "Run name  : ${run_name}"
@@ -65,8 +65,8 @@ run_cagrad() {
 			--slice-grad-project \
 			--slice-grad-projection-mode "${SLICE_GRAD_PROJECTION_MODE}" \
 			--slice-retain-batch-size-set each_task \
-			--slice-projection-method cagrad \
-			--slice-cagrad-c 0.50 \
+			--slice-projection-method pcgrad_c \
+			--slice-pcgrad-c 0.50 \
 			--train-only \
 			--keep-all-checkpoints \
 			--log-level "${LOG_LEVEL}" \
@@ -113,8 +113,8 @@ for sequence_name in "${SEQUENCES[@]}"; do
 		for alpha in "${ALPHAS[@]}"; do
 			label="${sequence_name}|${method}|alpha=${alpha}"
 			case "${method}" in
-				cagrad)
-					if run_cagrad "${sequence_name}" "${alpha}"; then
+				pcgrad_c)
+					if run_pcgrad_c "${sequence_name}" "${alpha}"; then
 						OK+=("${label}")
 					else
 						FAILED+=("${label}")

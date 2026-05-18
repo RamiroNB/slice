@@ -4,7 +4,7 @@ set -euo pipefail
 # Full SAPT training sweep — NI-Seq-G2, TRACE, NI-Seq-Opposite-v4.
 #
 # Inits × SAPT:
-#   lora_vanilla, loram, lora_ga, slice_cagrad_050, slice_cagrad_075
+#   lora_vanilla, loram, lora_ga, slice_pcgrad_c_050, slice_pcgrad_c_075
 #
 # Runs the fixed orchestrator from REPO_ROOT so per-stage router snapshots
 # (router_stage_NN.pt) are written at every stage. This enables correct
@@ -101,23 +101,23 @@ init_flags() {
                   --slice-cache-dir ${SLICE_CACHE_DIR} \
                   --slice-max-steps ${SLICE_MAX_STEPS}"
             ;;
-        slice_cagrad_050)
+        slice_pcgrad_c_050)
             echo "--slice-init --slice-init-method slice \
                   --slice-cache-dir ${SLICE_CACHE_DIR} \
                   --slice-max-steps ${SLICE_MAX_STEPS} \
                   --slice-grad-project \
-                  --slice-projection-method cagrad \
-                  --slice-cagrad-c 0.50 \
+                  --slice-projection-method pcgrad_c \
+                  --slice-pcgrad-c 0.50 \
                   --slice-grad-projection-mode global \
                   --slice-retain-batch-size-set each_task"
             ;;
-        slice_cagrad_075)
+        slice_pcgrad_c_075)
             echo "--slice-init --slice-init-method slice \
                   --slice-cache-dir ${SLICE_CACHE_DIR} \
                   --slice-max-steps ${SLICE_MAX_STEPS} \
                   --slice-grad-project \
-                  --slice-projection-method cagrad \
-                  --slice-cagrad-c 0.75 \
+                  --slice-projection-method pcgrad_c \
+                  --slice-pcgrad-c 0.75 \
                   --slice-grad-projection-mode global \
                   --slice-retain-batch-size-set each_task"
             ;;
@@ -142,7 +142,7 @@ filter_match() {
     return 1
 }
 
-INITS=(lora_vanilla loram lora_ga slice_basic slice_cagrad_050 slice_cagrad_075)
+INITS=(lora_vanilla loram lora_ga slice_basic slice_pcgrad_c_050 slice_pcgrad_c_075)
 
 # ---------------------------------------------------------------------------
 # Validate env before queuing any work.
