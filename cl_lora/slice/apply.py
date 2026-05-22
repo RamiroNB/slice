@@ -21,10 +21,8 @@ def apply_slice_inits(
     """Apply slice inits to a PEFT LoRA model with in-place absorption.
 
     `skip_absorption` (when not None) overrides the decomposition-based
-    default. SAPT sets it to True so the base weights stay pristine across
-    parallel adapters. `adapter_name` selects which named LoRA adapter on
-    each module receives the init (default `"default"`; SAPT uses
-    `"task_NN"` per-stage names).
+    default. `adapter_name` selects which named LoRA adapter on each module
+    receives the init (default `"default"`).
     """
     from peft.tuners.lora import Linear as LoraLinear
 

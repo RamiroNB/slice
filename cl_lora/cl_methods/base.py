@@ -5,7 +5,7 @@ slice). The init step writes the initial A/B; the CL method then runs three
 hooks during the per-stage training pipeline:
 
     initialize_lora_with_slice(...)         # init A/B (or no-op for vanilla)
-    cl_method.pre_train(lora_model, ...)    # post-init projection (e.g. InfLoRA)
+    cl_method.pre_train(lora_model, ...)    # post-init projection hook
     Trainer(... cl_method.aux_loss ...)     # extra loss term during training (O-LoRA)
     cl_method.post_train(lora_model, ...)   # snapshot state (A's, covariance)
     cl_method.save(state_dir)               # persist for next stage / resume
