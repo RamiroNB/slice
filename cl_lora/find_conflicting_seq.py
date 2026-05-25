@@ -443,15 +443,15 @@ def compute_task_gradient(
 
 
 def pair_conflict(
-    grads_forget: Dict[str, torch.Tensor],
+    grads_current: Dict[str, torch.Tensor],
     grads_retain: Dict[str, torch.Tensor],
 ) -> Dict[str, float]:
-    """Conflict metrics treating `grads_forget` as new task, `grads_retain` as old.
+    """Conflict metrics treating `grads_current` as new task, `grads_retain` as old.
 
     Reports what the SLICE projection would see:
       - global cosine similarity (sign indicates conflict)
-      - pct_conflicting: % of modules with dot(g_f, g_r) < 0 (projection fires)
-      - ratio_mean: mean ||G_tilde||/||G_forget|| across modules
+      - pct_conflicting: % of modules with dot(g_c, g_r) < 0 (projection fires)
+      - ratio_mean: mean ||G_tilde||/||G_current|| across modules
     """
     import torch
 
@@ -460,34 +460,34 @@ def pair_conflict(
     n_conflicting = 0
     n_modules = 0
     global_dot = 0.0
-    global_nf_sq = 0.0
+    global_nc_sq = 0.0
     global_nr_sq = 0.0
     eps = 1e-12
 
-    for name, g_f in grads_forget.items():
+    for name, g_c in grads_current.items():
         g_r = grads_retain.get(name)
         if g_r is None:
             continue
         n_modules += 1
-        f = g_f.detach().float().view(-1).double()
+        c = g_c.detach().float().view(-1).double()
         r = g_r.detach().float().view(-1).double()
-        dot = float(torch.dot(f, r).item())
-        nf = float(f.norm().item())
+        dot = float(torch.dot(c, r).item())
+        nc = float(c.norm().item())
         nr = float(r.norm().item())
-        cos = dot / (nf * nr + eps)
+        cos = dot / (nc * nr + eps)
 
         if dot < 0:
             n_conflicting += 1
             gamma = -dot / (nr * nr + eps)
-            proj_norm = float((f + gamma * r).norm().item())
-            ratio = proj_norm / (nf + eps)
+            proj_norm = float((c + gamma * r).norm().item())
+            ratio = proj_norm / (nc + eps)
         else:
             ratio = 1.0
 
         per_module_ratios.append(ratio)
         per_module_cosines.append(cos)
         global_dot += dot
-        global_nf_sq += nf * nf
+        global_nc_sq += nc * nc
         global_nr_sq += nr * nr
 
     if n_modules == 0:
@@ -504,7 +504,7 @@ def pair_conflict(
         "ratio_mean": float(ratios.mean()),
         "ratio_min": float(ratios.min()),
         "ratio_below_0.5_pct": float((ratios < 0.5).float().mean() * 100),
-        "global_cosine": global_dot / ((global_nf_sq ** 0.5) * (global_nr_sq ** 0.5) + eps),
+        "global_cosine": global_dot / ((global_nc_sq ** 0.5) * (global_nr_sq ** 0.5) + eps),
     }
 
 
@@ -516,10 +516,10 @@ def analyze_sequence(
     batch_size: int = 4,
     max_seq_length: int = 256,
     seed: int = 42,
-) -> Dict[str, Dict[str, float]]:  # keys are "forget|retain"
+) -> Dict[str, Dict[str, float]]:  # keys are "current|retain"
     """Load base model, compute per-task gradients, report all ordered pairs.
 
-    Returns dict keyed by "forget|retain" with the pair_conflict stats.
+    Returns dict keyed by "current|retain" with the pair_conflict stats.
     """
     from .train import HF_TOKEN, MODEL_NAME, build_tokenizer, load_base_model
 
@@ -550,14 +550,14 @@ def analyze_sequence(
     print(f"{sequence.description}")
     print(f"base model: {model_name}  (gradients on untrained base)")
     print("=" * 84)
-    print(f"{'forget (new)':26s} {'retain (old)':26s} "
+    print(f"{'current (new)':26s} {'retain (old)':26s} "
           f"{'glob_cos':>9s} {'mean_cos':>9s} {'ratio_mu':>9s} {'conf%':>6s}")
     print("-" * 84)
     for i, f_name in enumerate(task_names):
         for j, r_name in enumerate(task_names):
             if i == j:
                 continue
-            s = pair_conflict(task_grads[f_name], task_grads[r_name])
+            s = pair_conflict(task_grads[f_name], task_grads[r_name])  # f_name = current, r_name = retain
             report[f"{f_name}|{r_name}"] = s
             print(
                 f"{f_name[:26]:26s} {r_name[:26]:26s} "

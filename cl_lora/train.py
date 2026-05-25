@@ -372,7 +372,7 @@ def train_on_task(
     slice_cosine_threshold: float | None = None,
     slice_per_layer_threshold: bool = False,
     slice_per_layer_threshold_delta: float = 0.0,
-    slice_cagrad_c: float = 0.5,
+    slice_pcgrad_c: float = 0.5,
     slice_gradvac_phi: float = 0.0,
     slice_gradvac_beta: float = 0.5,
     slice_magnitude_preserve: bool = False,
@@ -440,7 +440,7 @@ def train_on_task(
             cosine_threshold=slice_cosine_threshold,
             per_layer_threshold=slice_per_layer_threshold,
             per_layer_threshold_delta=slice_per_layer_threshold_delta,
-            cagrad_c=slice_cagrad_c,
+            pcgrad_c=slice_pcgrad_c,
             gradvac_phi=slice_gradvac_phi,
             gradvac_beta=slice_gradvac_beta,
             magnitude_preserve=slice_magnitude_preserve,
@@ -458,7 +458,7 @@ def train_on_task(
         num_written = initialize_lora_with_slice(
             model=lora_model,
             tokenizer=tokenizer,
-            forget_task=task,
+            current_task=task,
             retain_tasks=retain_tasks,
             config=slice_config,
             adapter_name=active_adapter,
@@ -669,7 +669,7 @@ def main() -> None:
     parser.add_argument("--slice-cache-dir", default="slice_cache")
     parser.add_argument("--slice-max-steps", type=int, default=100)
     parser.add_argument("--slice-retain-scale", type=float, default=1.0)
-    parser.add_argument("--slice-grad-project", action="store_true", help="Project forget gradients against retain gradients for slice init.")
+    parser.add_argument("--slice-grad-project", action="store_true", help="Project current-task gradients against retain gradients for slice init.")
     parser.add_argument(
         "--slice-grad-projection-mode",
         choices=["per_module", "global"],
@@ -694,10 +694,10 @@ def main() -> None:
         default="all_tasks",
         help="How retain batch size is applied: 'all_tasks' = total across all tasks, 'each_task' = per task.")
     parser.add_argument("--slice-single-retain-task-mode", action="store_true",
-        help="Only use the most recent previous task for retain, with same batch size as forget.")
+        help="Only use the most recent previous task for retain, with same batch size as current task.")
     parser.add_argument("--slice-init-method", choices=["slice", "lora_ga", "loram"],
         default="slice",
-        help="Initialization method: 'slice' (default), 'lora_ga' (SVD on forget gradients only), "
+        help="Initialization method: 'slice' (default), 'lora_ga' (SVD on current-task gradients only), "
              "or 'loram' (DST-based, no gradients).")
     args = parser.parse_args()
 

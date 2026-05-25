@@ -1,13 +1,13 @@
 """Advanced gradient-surgery projection methods.
 
-Implements ideas A.1 (CAGrad), A.2 (GradVac), A.3 (cosine threshold),
+Implements ideas A.1 (PCGrad_c), A.2 (GradVac), A.3 (cosine threshold),
 A.4 (per-layer threshold), A.5 (null-space), A.6 (magnitude preserving)
 from ideas_for_new_methods.md. Kept on the same device as input
 gradients to avoid CPU offload of large tensors.
 
 Global mode:
   For methods whose projection math has a distributive form (pcgrad,
-  cagrad, magnitude_preserving, and pcgrad/cagrad with the cosine-
+  pcgrad_c, magnitude_preserving, and pcgrad/pcgrad_c with the cosine-
   threshold gate), a single global gamma is computed by summing
   per-module dot products and retain-gradient norms -- no concatenated
   whole-model vector is ever built. Methods whose math is inherently
@@ -29,7 +29,7 @@ _EPS = 1e-12
 
 # Methods whose projection is well-defined globally via the distributive
 # property (sum of per-module dot products / squared norms).
-_GLOBAL_COMPATIBLE_METHODS = {"pcgrad", "cagrad", "magnitude_preserving"}
+_GLOBAL_COMPATIBLE_METHODS = {"pcgrad", "pcgrad_c", "magnitude_preserving"}
 
 
 def _flat_f64(t: torch.Tensor) -> torch.Tensor:
@@ -53,7 +53,7 @@ def _magnitude_preserve(g_new: torch.Tensor, g_orig_norm: float) -> torch.Tensor
 
 
 def _decide_cosine_thresholds(
-    grads_forget: Dict[str, torch.Tensor],
+    grads_current: Dict[str, torch.Tensor],
     grads_retain: Dict[str, torch.Tensor],
     *,
     config_cos_tau,
@@ -62,11 +62,11 @@ def _decide_cosine_thresholds(
 ) -> Dict[str, float]:
     """Return per-module cosine threshold to compare against."""
     cos_map: Dict[str, float] = {}
-    for name, g_f in grads_forget.items():
+    for name, g_c in grads_current.items():
         g_r = grads_retain.get(name)
         if g_r is None:
             continue
-        cos_map[name] = _cosine(_flat_f64(g_f), _flat_f64(g_r))
+        cos_map[name] = _cosine(_flat_f64(g_c), _flat_f64(g_r))
 
     if per_layer and cos_map:
         vals = sorted(cos_map.values())
@@ -97,7 +97,7 @@ def _pcgrad_update(g_f: torch.Tensor, g_r: torch.Tensor) -> torch.Tensor:
     return (g_f_flat + gamma * g_r_flat).view(g_f.shape)
 
 
-def _cagrad_update(g_f: torch.Tensor, g_r: torch.Tensor, c: float) -> torch.Tensor:
+def _pcgrad_c_update(g_f: torch.Tensor, g_r: torch.Tensor, c: float) -> torch.Tensor:
     """Soft interpolation between vanilla (c=0) and PCGrad (c=1)."""
     g_f_flat = _flat_f64(g_f)
     g_r_flat = _flat_f64(g_r)
@@ -146,7 +146,7 @@ def _nullspace_update(
     Runs on the gradient's device (GPU).
 
     SVD failures propagate -- do not silently fall back to the untouched
-    forget gradient, because that would make the run indistinguishable
+    current-task gradient, because that would make the run indistinguishable
     from a no-projection run without any warning.
     """
     q = min(max(int(k), 1), min(g_r.shape))
@@ -167,45 +167,45 @@ def _nullspace_update(
 
 
 def _global_accumulators(
-    grads_forget: Dict[str, torch.Tensor],
+    grads_current: Dict[str, torch.Tensor],
     grads_retain: Dict[str, torch.Tensor],
 ) -> Tuple[float, float, float]:
-    """Compute sum_dot, sum_denom_r, sum_denom_f across modules.
+    """Compute sum_dot, sum_denom_r, sum_denom_c across modules.
 
     Uses the distributive property: <concat(a_i), concat(b_i)> = sum_i <a_i, b_i>,
     so no whole-model flattened vector is ever materialised.
     """
     sum_dot = 0.0
     sum_denom_r = 0.0
-    sum_denom_f = 0.0
-    for name, g_f in grads_forget.items():
+    sum_denom_c = 0.0
+    for name, g_c in grads_current.items():
         g_r = grads_retain.get(name)
         if g_r is None:
             continue
-        g_f_flat = _flat_f64(g_f)
+        g_c_flat = _flat_f64(g_c)
         g_r_flat = _flat_f64(g_r)
-        sum_dot += float(torch.dot(g_f_flat, g_r_flat).item())
+        sum_dot += float(torch.dot(g_c_flat, g_r_flat).item())
         sum_denom_r += float(torch.dot(g_r_flat, g_r_flat).item())
-        sum_denom_f += float(torch.dot(g_f_flat, g_f_flat).item())
-    return sum_dot, sum_denom_r, sum_denom_f
+        sum_denom_c += float(torch.dot(g_c_flat, g_c_flat).item())
+    return sum_dot, sum_denom_r, sum_denom_c
 
 
 def _global_projection(
-    grads_forget: Dict[str, torch.Tensor],
+    grads_current: Dict[str, torch.Tensor],
     grads_retain: Dict[str, torch.Tensor],
     *,
     method: str,
     cosine_threshold,
-    cagrad_c: float,
+    pcgrad_c: float,
     magnitude_preserve: bool,
     always_project: bool,
     add_retain_grad: bool,
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
-    """Global variant for pcgrad / cagrad / magnitude_preserving.
+    """Global variant for pcgrad / pcgrad_c / magnitude_preserving.
 
     Computes one scalar gamma from summed dot-products and retain-grad
-    squared norms, then applies it uniformly: g_f_i <- g_f_i + gamma * g_r_i
-    (for cagrad, gamma *= c). Magnitude preservation, if requested, is
+    squared norms, then applies it uniformly: g_c_i <- g_c_i + gamma * g_r_i
+    (for pcgrad_c, gamma *= c). Magnitude preservation, if requested, is
     applied per module afterwards (orthogonal to projection scope).
     """
     if method not in _GLOBAL_COMPATIBLE_METHODS:
@@ -215,19 +215,19 @@ def _global_projection(
             f"expected one of {sorted(_GLOBAL_COMPATIBLE_METHODS)}."
         )
 
-    sum_dot, sum_denom_r, sum_denom_f = _global_accumulators(
-        grads_forget, grads_retain,
+    sum_dot, sum_denom_r, sum_denom_c = _global_accumulators(
+        grads_current, grads_retain,
     )
     global_cos = 0.0
-    if sum_denom_r > _EPS and sum_denom_f > _EPS:
-        global_cos = sum_dot / math.sqrt(sum_denom_r * sum_denom_f)
+    if sum_denom_r > _EPS and sum_denom_c > _EPS:
+        global_cos = sum_dot / math.sqrt(sum_denom_r * sum_denom_c)
 
     tau = float(cosine_threshold) if cosine_threshold is not None else 0.0
     do_project = always_project or (global_cos < tau)
 
     gamma_full = -sum_dot / (sum_denom_r + _EPS)
-    if method == "cagrad":
-        gamma = float(cagrad_c) * gamma_full
+    if method == "pcgrad_c":
+        gamma = float(pcgrad_c) * gamma_full
     else:
         # pcgrad and magnitude_preserving use full pcgrad gamma before
         # any per-module rescale.
@@ -244,7 +244,7 @@ def _global_projection(
         "global": {
             "sum_dot": sum_dot,
             "sum_denom_r": sum_denom_r,
-            "sum_denom_f": sum_denom_f,
+            "sum_denom_c": sum_denom_c,
             "cos": global_cos,
             "gamma": gamma,
             "do_project": bool(do_project),
@@ -252,26 +252,26 @@ def _global_projection(
         "modules": {},
     }
 
-    for name, g_f in grads_forget.items():
+    for name, g_c in grads_current.items():
         g_r = grads_retain.get(name)
         if g_r is None:
-            projected[name] = g_f
+            projected[name] = g_c
             stats["modules"][name] = {"status": "missing_retain_grad"}
             continue
 
-        orig_norm = float(_flat_f64(g_f).norm().item())
+        orig_norm = float(_flat_f64(g_c).norm().item())
 
         if do_project:
-            g_f_flat = _flat_f64(g_f)
+            g_c_flat = _flat_f64(g_c)
             g_r_flat = _flat_f64(g_r)
-            g_new = (g_f_flat + gamma * g_r_flat).view(g_f.shape).to(g_f.dtype)
+            g_new = (g_c_flat + gamma * g_r_flat).view(g_c.shape).to(g_c.dtype)
             action = method
         else:
-            g_new = g_f
+            g_new = g_c
             action = "skipped"
 
         if magnitude_preserve and do_project:
-            g_new = _magnitude_preserve(g_new.float(), orig_norm).to(g_f.dtype)
+            g_new = _magnitude_preserve(g_new.float(), orig_norm).to(g_c.dtype)
 
         if add_retain_grad:
             g_new = g_new + g_r.to(device=g_new.device, dtype=g_new.dtype)
@@ -279,7 +279,7 @@ def _global_projection(
         projected[name] = g_new
         stats["modules"][name] = {
             "action": action,
-            "forget_norm": orig_norm,
+            "current_norm": orig_norm,
             "retain_norm": float(_flat_f64(g_r).norm().item()),
             "projected_norm": float(g_new.float().view(-1).norm().item()),
         }
@@ -288,14 +288,14 @@ def _global_projection(
 
 
 def project_gradients_advanced(
-    grads_forget: Dict[str, torch.Tensor],
+    grads_current: Dict[str, torch.Tensor],
     grads_retain: Dict[str, torch.Tensor],
     *,
     method: str,
     cosine_threshold,
     per_layer_threshold: bool,
     per_layer_threshold_delta: float,
-    cagrad_c: float,
+    pcgrad_c: float,
     gradvac_phi: float,
     gradvac_beta: float,
     magnitude_preserve: bool,
@@ -337,11 +337,11 @@ def project_gradients_advanced(
             method, cosine_threshold, bool(magnitude_preserve),
         )
         return _global_projection(
-            grads_forget=grads_forget,
+            grads_current=grads_current,
             grads_retain=grads_retain,
             method=method,
             cosine_threshold=cosine_threshold,
-            cagrad_c=cagrad_c,
+            pcgrad_c=pcgrad_c,
             magnitude_preserve=magnitude_preserve,
             always_project=always_project,
             add_retain_grad=add_retain_grad,
@@ -360,58 +360,58 @@ def project_gradients_advanced(
     }
 
     cos_tau = _decide_cosine_thresholds(
-        grads_forget, grads_retain,
+        grads_current, grads_retain,
         config_cos_tau=cosine_threshold,
         per_layer=per_layer_threshold,
         delta=per_layer_threshold_delta,
     )
 
     # GradVac keeps a running EMA of target cosine per-module.
-    phi_state: Dict[str, float] = {n: float(gradvac_phi) for n in grads_forget}
+    phi_state: Dict[str, float] = {n: float(gradvac_phi) for n in grads_current}
 
-    for name, g_f in grads_forget.items():
+    for name, g_c in grads_current.items():
         g_r = grads_retain.get(name)
         if g_r is None:
-            projected[name] = g_f
+            projected[name] = g_c
             stats["modules"][name] = {"status": "missing_retain_grad"}
             continue
 
-        g_f_flat = _flat_f64(g_f)
+        g_c_flat = _flat_f64(g_c)
         g_r_flat = _flat_f64(g_r)
-        orig_norm = float(g_f_flat.norm().item())
-        cos = _cosine(g_f_flat, g_r_flat)
+        orig_norm = float(g_c_flat.norm().item())
+        cos = _cosine(g_c_flat, g_r_flat)
         tau = cos_tau.get(name, 0.0)
 
         if method == "nullspace":
             # Null-space projection ignores the cosine gate by design.
             g_new = _nullspace_update(
-                g_f, g_r, k=nullspace_rank, sv_thresh=nullspace_sv_threshold,
+                g_c, g_r, k=nullspace_rank, sv_thresh=nullspace_sv_threshold,
             )
             action = "nullspace"
         elif not _should_project(cos, tau, always_project):
-            g_new = g_f
+            g_new = g_c
             action = "skipped"
         elif method == "pcgrad":
-            g_new = _pcgrad_update(g_f, g_r).to(g_f.dtype)
+            g_new = _pcgrad_update(g_c, g_r).to(g_c.dtype)
             action = "pcgrad"
-        elif method == "cagrad":
-            g_new = _cagrad_update(g_f, g_r, c=cagrad_c).to(g_f.dtype)
-            action = "cagrad"
+        elif method == "pcgrad_c":
+            g_new = _pcgrad_c_update(g_c, g_r, c=pcgrad_c).to(g_c.dtype)
+            action = "pcgrad_c"
         elif method == "gradvac":
             phi = phi_state.get(name, float(gradvac_phi))
-            g_new, observed_cos = _gradvac_update(g_f, g_r, phi=phi)
+            g_new, observed_cos = _gradvac_update(g_c, g_r, phi=phi)
             # EMA update of target cosine.
             phi_state[name] = (1.0 - gradvac_beta) * phi + gradvac_beta * observed_cos
             action = "gradvac"
         elif method == "magnitude_preserving":
-            g_new_flat = _pcgrad_update(g_f, g_r)
-            g_new = _magnitude_preserve(g_new_flat, orig_norm).to(g_f.dtype)
+            g_new_flat = _pcgrad_update(g_c, g_r)
+            g_new = _magnitude_preserve(g_new_flat, orig_norm).to(g_c.dtype)
             action = "mag_preserve_pcgrad"
         else:
             raise ValueError(f"Unknown projection method: {method!r}")
 
         if magnitude_preserve and method != "magnitude_preserving" and action != "skipped":
-            g_new = _magnitude_preserve(g_new.float(), orig_norm).to(g_f.dtype)
+            g_new = _magnitude_preserve(g_new.float(), orig_norm).to(g_c.dtype)
 
         if add_retain_grad:
             g_new = g_new + g_r.to(device=g_new.device, dtype=g_new.dtype)
@@ -421,7 +421,7 @@ def project_gradients_advanced(
             "action": action,
             "cos": cos,
             "tau": tau,
-            "forget_norm": orig_norm,
+            "current_norm": orig_norm,
             "retain_norm": float(g_r_flat.norm().item()),
             "projected_norm": float(g_new.float().view(-1).norm().item()),
         }

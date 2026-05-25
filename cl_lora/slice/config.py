@@ -25,7 +25,7 @@ class SliceInitConfig:
     init_method: str = "slice"  # "slice" (default), "lora_ga", or "loram"
 
     # Advanced projection methods (ideas A.1-A.6 from ideas_for_new_methods.md).
-    # projection_method: "pcgrad" (existing), "cagrad", "gradvac",
+    # projection_method: "pcgrad" (existing), "pcgrad_c", "gradvac",
     #                    "nullspace", "magnitude_preserving"
     projection_method: str = "pcgrad"
     # Cosine-based conflict threshold (idea A.3). If not None, projection only
@@ -35,8 +35,8 @@ class SliceInitConfig:
     # set to (median_cos across modules) - per_layer_threshold_delta.
     per_layer_threshold: bool = False
     per_layer_threshold_delta: float = 0.0
-    # CAGrad strength c in [0,1]. 0 = vanilla (no projection), 1 = full PCGrad (idea A.1).
-    cagrad_c: float = 0.5
+    # PCGrad_c strength c in [0,1]. 0 = vanilla (no projection), 1 = full PCGrad (idea A.1).
+    pcgrad_c: float = 0.5
     # GradVac target cosine and EMA beta (idea A.2).
     gradvac_phi: float = 0.0
     gradvac_beta: float = 0.5

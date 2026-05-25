@@ -122,7 +122,7 @@ run_loram_baseline() {
 			"${EXTRA_ARGS[@]}"
 }
 
-# LoRA-GA baseline: SVD on forget gradients only.
+# LoRA-GA baseline: SVD on current-task gradients only.
 # $1 sequence, $2 svd_selection ("lora_ga" disjoint slices, or "top_r_no_sigma")
 run_lora_ga_baseline() {
 	local sequence_name="$1"
@@ -155,17 +155,17 @@ run_lora_ga_baseline() {
 }
 
 # Variants: (tag, flags...)
-# A.1 CAGrad at c in {0.25, 0.5, 0.75}                -- supports global projection
+# A.1 PCGrad_c at c in {0.25, 0.5, 0.75}              -- supports global projection
 # A.2 GradVac (phi=0, beta=0.5)                       -- per_module only (see below)
 # A.3 cosine-threshold sweep tau in {-0.05, 0.0, 0.05, 0.1} -- supports global
 # A.4 per-layer threshold with delta in {0.0, 0.05}   -- per_module only
 # A.5 null-space projection (rank 8, 32)              -- per_module only
 # A.6 magnitude-preserving (applied on top of pcgrad) -- supports global
 # C.16 top_r_no_sigma SVD selection (with default pcgrad)
-# Plus a "combo" variant (cagrad + magnitude preserve + top_r_no_sigma)
+# Plus a "combo" variant (pcgrad_c + magnitude preserve + top_r_no_sigma)
 #
 # Global projection is defined via the distributive property (sum of per-module
-# dot products / squared norms) for pcgrad / cagrad / magnitude_preserving.
+# dot products / squared norms) for pcgrad / pcgrad_c / magnitude_preserving.
 # For nullspace / gradvac / per_layer_threshold the math has no meaningful
 # global analog and the orchestrator now raises an error if global is requested,
 # so those variants explicitly override the projection mode to per_module.
@@ -175,10 +175,10 @@ VARIANTS=(
 	"slice_basic_lora_ga|--slice-svd-selection lora_ga"
 	"slice_basic_top_r_no_sigma|--slice-svd-selection top_r_no_sigma"
 	"magpreserve|--slice-projection-method magnitude_preserving"
-	"combo_cagrad_mag_topr|--slice-projection-method cagrad --slice-cagrad-c 0.5 --slice-magnitude-preserve --slice-svd-selection top_r_no_sigma"
-	"cagrad_c025|--slice-projection-method cagrad --slice-cagrad-c 0.25"
-	"cagrad_c050|--slice-projection-method cagrad --slice-cagrad-c 0.50"
-	"cagrad_c075|--slice-projection-method cagrad --slice-cagrad-c 0.75"
+	"combo_pcgrad_c_mag_topr|--slice-projection-method pcgrad_c --slice-pcgrad-c 0.5 --slice-magnitude-preserve --slice-svd-selection top_r_no_sigma"
+	"pcgrad_c025|--slice-projection-method pcgrad_c --slice-pcgrad-c 0.25"
+	"pcgrad_c050|--slice-projection-method pcgrad_c --slice-pcgrad-c 0.50"
+	"pcgrad_c075|--slice-projection-method pcgrad_c --slice-pcgrad-c 0.75"
 	"gradvac_phi0_b05|--slice-projection-method gradvac --slice-gradvac-phi 0.0 --slice-gradvac-beta 0.5 --slice-grad-projection-mode per_module"
 	"costau_neg005|--slice-cosine-threshold -0.05"
 	"costau_000|--slice-cosine-threshold 0.0"
