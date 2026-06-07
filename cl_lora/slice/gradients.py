@@ -15,9 +15,16 @@ def accumulate_gradients(
     target_params: Dict[str, torch.nn.Parameter],
     device: torch.device,
     max_steps: int,
+    accum_device: torch.device | None = None,
 ) -> Tuple[Dict[str, torch.Tensor], int]:
+    # [2GPU-B] The grad accumulator may live on a different device than the model
+    # (e.g. a second GPU) to free VRAM on the model device. The per-step add does
+    # an EXACT device copy of param.grad (no dtype change), so the accumulated
+    # gradient is bit-identical to single-device accumulation. Forward/backward
+    # math is unchanged.
+    buf_dev = accum_device if accum_device is not None else device
     grads: Dict[str, torch.Tensor] = {
-        name: torch.zeros_like(param, device=device) for name, param in target_params.items()
+        name: torch.zeros_like(param, device=buf_dev) for name, param in target_params.items()
     }
 
     # PEFT freezes base weights (requires_grad=False) so backward would
@@ -40,6 +47,7 @@ def accumulate_gradients(
             model.gradient_checkpointing_enable()
 
     steps = 0
+    skipped = 0
     model.train()
     for batch in dataloader:
         if max_steps and steps >= max_steps:
@@ -47,6 +55,16 @@ def accumulate_gradients(
         batch = {k: v.to(device) for k, v in batch.items()}
         outputs = model(**batch)
         loss = outputs.loss
+        # Skip batches with non-finite loss. A batch where every label is masked
+        # (-100) gives a causal-LM CE mean over zero valid tokens -> NaN; letting it
+        # backward would poison the accumulated gradient with NaN/Inf and break the
+        # downstream SVD. bf16 backward at 8B can also occasionally produce non-finite
+        # values. Skipping such batches keeps the slice-init gradient well-defined.
+        if not torch.isfinite(loss):
+            skipped += 1
+            logger.warning("Non-finite slice-init loss; skipping batch (total skipped=%d)", skipped)
+            model.zero_grad(set_to_none=True)
+            continue
         loss.backward()
         for name, param in target_params.items():
             if param.grad is None:
@@ -54,9 +72,18 @@ def accumulate_gradients(
                     f"param.grad is None for {name} despite requires_grad=True. "
                     "This should not happen -- check model wiring."
                 )
-            grads[name] = grads[name] + param.grad.detach()
+            g = param.grad.detach()
+            # Zero any non-finite grad entries so a single bad element from one batch
+            # cannot break the SVD (cheap elementwise; no device sync). Finite entries
+            # from good batches still accumulate normally.
+            g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
+            if g.device != buf_dev:
+                g = g.to(buf_dev)  # exact copy (e.g. model GPU -> accumulator GPU)
+            grads[name] = grads[name] + g
         model.zero_grad(set_to_none=True)
         steps += 1
+    if skipped:
+        logger.warning("slice-init accumulate: skipped %d non-finite-loss batch(es); kept %d step(s)", skipped, steps)
 
     # Restore gradient checkpointing and use_cache state.
     if not _had_gc and hasattr(model, "gradient_checkpointing_disable"):

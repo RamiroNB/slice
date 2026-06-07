@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import math
 from typing import Dict
 
 import torch
+
+logger = logging.getLogger("cl_lora.slice.decompose")
 
 
 def build_ab_from_gradient(
@@ -21,7 +24,10 @@ def build_ab_from_gradient(
     """
     device = G.device
     d_out, d_in = G.shape
-    G32 = G.float()
+    # Safety net: zero any non-finite entries before SVD. The accumulator already
+    # skips non-finite-loss batches and sanitizes per-step, but a residual NaN/Inf
+    # here would make torch.linalg.svd fail to converge ("non-finite values").
+    G32 = torch.nan_to_num(G.float(), nan=0.0, posinf=0.0, neginf=0.0)
     if svd_selection == "lora_ga":
         q = min(4 * r, min(G32.shape))
     else:
@@ -29,9 +35,22 @@ def build_ab_from_gradient(
     if q <= 0:
         raise ValueError("Invalid rank for slice initialization")
 
-    U, _, V = torch.svd_lowrank(G32, q=q, niter=4)
-
-    Vt = V.t()
+    try:
+        U, _, V = torch.svd_lowrank(G32, q=q, niter=4)
+        Vt = V.t()
+    except (torch.linalg.LinAlgError, RuntimeError) as e:
+        # Randomized SVD (cuSOLVER) can fail to converge on ill-conditioned
+        # gradient matrices; the failure depends on the random projection draw.
+        # Fall back to a full, deterministic SVD on CPU (LAPACK), which yields the
+        # EXACT top-q singular vectors that svd_lowrank was approximating. Only the
+        # rare failing module takes this path; successful modules are unchanged.
+        logger.warning(
+            "svd_lowrank failed (%s); full CPU SVD fallback for shape=%s q=%d",
+            type(e).__name__, tuple(G32.shape), q,
+        )
+        U_f, _, Vh_f = torch.linalg.svd(G32.detach().cpu(), full_matrices=False)
+        U = U_f[:, :q].to(device)
+        Vt = Vh_f[:q, :].to(device)
     if svd_selection == "lora_ga":
         B = U[:, :r]
         A = Vt[r : 2 * r, :]

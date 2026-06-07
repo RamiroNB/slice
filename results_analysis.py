@@ -339,6 +339,14 @@ def _try_recompute_summary(run_dir: Path) -> None:
         print(f"  [warn] could not recompute summary for {run_dir.name}: {e}")
 
 
+def _is_under_alpha_sweep(run_dir: Path) -> bool:
+    try:
+        run_dir.resolve().relative_to(ALPHA_SWEEP_RESULTS.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def load_run(run_dir: Path) -> dict | None:
     metrics_path = run_dir / "metrics.json"
     if not metrics_path.exists():
@@ -371,7 +379,8 @@ def load_run(run_dir: Path) -> dict | None:
             matrix = json.load(f)
 
     benchmarks = _load_benchmark_scores(run_dir)
-    metrics["GP"] = _gp_no_bbh(benchmarks, metrics.get("GP"))
+    if not _is_under_alpha_sweep(run_dir):
+        metrics["GP"] = _gp_no_bbh(benchmarks, metrics.get("GP"))
 
     return {
         "seq_name": config.get("sequence") or run_dir.parent.name,

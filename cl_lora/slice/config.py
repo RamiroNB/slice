@@ -20,6 +20,7 @@ class SliceInitConfig:
     max_seq_length: int = 256
     retain_batch_size: Optional[int] = None
     retain_grad_accum: Optional[int] = None
+    micro_batch_size: Optional[int] = None
     retain_batch_size_set: str = "all_tasks"
     single_retain_task_mode: bool = False
     init_method: str = "slice"  # "slice" (default), "lora_ga", or "loram"

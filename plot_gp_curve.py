@@ -24,15 +24,17 @@ Usage examples
   # Save instead of showing
   python plot_gp_curve.py --seq NI-Seq-Opposite-v4 --save plots/
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import re
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import matplotlib.ticker as mticker
 import numpy as np
 
@@ -51,12 +53,12 @@ ROOTS = [
 ]
 
 BENCHMARK_SHORT = {
-    "hellaswag":          "HellaSwag",
-    "commonsenseqa":      "CommonsenseQA",
-    "alpaca":             "Alpaca",
+    "hellaswag": "HellaSwag",
+    "commonsenseqa": "CommonsenseQA",
+    "alpaca": "Alpaca",
     "bbh_object_counting": "BBH-ObjCount",
-    "openbookqa":         "OpenBookQA",
-    "lambada":            "Lambada",
+    "openbookqa": "OpenBookQA",
+    "lambada": "Lambada",
 }
 
 # Directories inside a root that are grouping dirs, not sequence dirs.
@@ -70,7 +72,7 @@ GP_EXCLUDE = {"bbh_object_counting"}
 
 def extract_rank(method: str) -> str:
     """Return 'rN' from a trailing _rN suffix, defaulting to 'r64'."""
-    m = re.search(r'_r(\d+)$', method)
+    m = re.search(r"_r(\d+)$", method)
     return f"r{m.group(1)}" if m else "r64"
 
 
@@ -92,6 +94,7 @@ def _strip_common_suffix(names: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+
 
 def _load_results_matrix(run_dir: Path) -> list[dict]:
     path = run_dir / "results_matrix.json"
@@ -130,7 +133,9 @@ def _ip_mean_no_bbh(ip: dict) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
-def collect_runs_for_seq(seq_name: str | None, method_filter: list[str] | None) -> list[dict]:
+def collect_runs_for_seq(
+    seq_name: str | None, method_filter: list[str] | None
+) -> list[dict]:
     """Return list of run dicts with per-stage benchmark data.
 
     seq_name=None collects all sequences found across ROOTS.
@@ -146,13 +151,18 @@ def collect_runs_for_seq(seq_name: str | None, method_filter: list[str] | None) 
         if method.startswith("incomplete_"):
             return
         records = _load_stage_records(run_dir)
-        matrix  = _load_results_matrix(run_dir)
+        matrix = _load_results_matrix(run_dir)
         if not records and not matrix:
             return
         key = (resolved_seq, method)
         if key not in seen or len(records) > len(seen[key]["records"]):
-            seen[key] = {"method": method, "seq": resolved_seq, "records": records,
-                         "matrix": matrix, "run_dir": run_dir}
+            seen[key] = {
+                "method": method,
+                "seq": resolved_seq,
+                "records": records,
+                "matrix": matrix,
+                "run_dir": run_dir,
+            }
 
     def _infer_seq(d: Path) -> str | None:
         """Read seq from run_config.json / run_summary.json inside dir d."""
@@ -162,8 +172,9 @@ def collect_runs_for_seq(seq_name: str | None, method_filter: list[str] | None) 
                 try:
                     with cfg_path.open() as f:
                         cfg = json.load(f)
-                    return (cfg.get("orchestrator", {}).get("cli_args", {}).get("sequence")
-                            or cfg.get("sequence"))
+                    return cfg.get("orchestrator", {}).get("cli_args", {}).get(
+                        "sequence"
+                    ) or cfg.get("sequence")
                 except Exception:
                     pass
                 break
@@ -200,6 +211,7 @@ def collect_runs_for_seq(seq_name: str | None, method_filter: list[str] | None) 
 # Plotting
 # ---------------------------------------------------------------------------
 
+
 def _stage_series(run: dict) -> dict[int, dict]:
     """Return {stage_idx: {gp, ip, gp_per_bench, ip_per_bench}} for a run."""
     series = {}
@@ -211,10 +223,10 @@ def _stage_series(run: dict) -> dict[int, dict]:
         if not gp and not ip:
             continue
         series[stage] = {
-            "gp":      _gp_mean_no_bbh(gp),
-            "ip":      _ip_mean_no_bbh(ip),
-            "gp_per":  {BENCHMARK_SHORT.get(k, k): v for k, v in gp.items()},
-            "ip_per":  {BENCHMARK_SHORT.get(k, k): v for k, v in ip.items()},
+            "gp": _gp_mean_no_bbh(gp),
+            "ip": _ip_mean_no_bbh(ip),
+            "gp_per": {BENCHMARK_SHORT.get(k, k): v for k, v in gp.items()},
+            "ip_per": {BENCHMARK_SHORT.get(k, k): v for k, v in ip.items()},
         }
     return series
 
@@ -228,8 +240,9 @@ def _task_labels(run: dict) -> dict[int, str]:
     return labels
 
 
-def plot_gp_ip(runs: list[dict], metrics: list[str], seq_name: str,
-               save_dir: Path | None) -> None:
+def plot_gp_ip(
+    runs: list[dict], metrics: list[str], seq_name: str, save_dir: Path | None
+) -> None:
     short_names = _strip_common_suffix([r["method"] for r in runs])
     name_map = dict(zip([r["method"] for r in runs], short_names))
 
@@ -262,11 +275,23 @@ def plot_gp_ip(runs: list[dict], metrics: list[str], seq_name: str,
 
             # full curve vs single final point
             if len(stages) > 1:
-                ax.plot(stages, [v * 100 if v else None for v in vals],
-                        marker="o", label=short, color=color, linewidth=1.8)
+                ax.plot(
+                    stages,
+                    [v * 100 if v else None for v in vals],
+                    marker="o",
+                    label=short,
+                    color=color,
+                    linewidth=1.8,
+                )
             else:
-                ax.scatter(stages, [v * 100 if v else None for v in vals],
-                           marker="D", s=60, label=f"{short} (final only)", color=color)
+                ax.scatter(
+                    stages,
+                    [v * 100 if v else None for v in vals],
+                    marker="D",
+                    s=60,
+                    label=f"{short} (final only)",
+                    color=color,
+                )
 
         ax.set_title(f"{'GP' if metric == 'gp' else 'IP'} across stages — {seq_name}")
         ax.set_xlabel("Stage")
@@ -278,8 +303,12 @@ def plot_gp_ip(runs: list[dict], metrics: list[str], seq_name: str,
             ax2.set_xlim(ax.get_xlim())
             tick_stages = [s for s in all_stages if s in task_labels]
             ax2.set_xticks(tick_stages)
-            ax2.set_xticklabels([task_labels[s] for s in tick_stages],
-                                 rotation=30, ha="left", fontsize=7)
+            ax2.set_xticklabels(
+                [task_labels[s] for s in tick_stages],
+                rotation=30,
+                ha="left",
+                fontsize=7,
+            )
 
         ax.legend(fontsize=7, loc="lower left")
         ax.grid(True, alpha=0.3)
@@ -294,7 +323,9 @@ def plot_per_benchmark(runs: list[dict], seq_name: str, save_dir: Path | None) -
     for r in runs:
         for s in _stage_series(r).values():
             for k in s["gp_per"]:
-                if k not in bench_names and k not in {BENCHMARK_SHORT.get("bbh_object_counting")}:
+                if k not in bench_names and k not in {
+                    BENCHMARK_SHORT.get("bbh_object_counting")
+                }:
                     bench_names.append(k)
             break
 
@@ -321,10 +352,23 @@ def plot_per_benchmark(runs: list[dict], seq_name: str, save_dir: Path | None) -
             vals = [series[s]["gp_per"].get(bench) for s in stages]
             vals_pct = [v * 100 if v is not None else None for v in vals]
             if len(stages) > 1:
-                ax.plot(stages, vals_pct, marker="o", label=short, color=color, linewidth=1.8)
+                ax.plot(
+                    stages,
+                    vals_pct,
+                    marker="o",
+                    label=short,
+                    color=color,
+                    linewidth=1.8,
+                )
             else:
-                ax.scatter(stages, vals_pct, marker="D", s=60,
-                           label=f"{short} (final only)", color=color)
+                ax.scatter(
+                    stages,
+                    vals_pct,
+                    marker="D",
+                    s=60,
+                    label=f"{short} (final only)",
+                    color=color,
+                )
 
         ax.set_title(f"{bench} (zero-shot) — {seq_name}")
         ax.set_xlabel("Stage")
@@ -335,14 +379,50 @@ def plot_per_benchmark(runs: list[dict], seq_name: str, save_dir: Path | None) -
             ax2.set_xlim(ax.get_xlim())
             tick_stages = sorted(task_labels)
             ax2.set_xticks(tick_stages)
-            ax2.set_xticklabels([task_labels[s] for s in tick_stages],
-                                 rotation=30, ha="left", fontsize=7)
+            ax2.set_xticklabels(
+                [task_labels[s] for s in tick_stages],
+                rotation=30,
+                ha="left",
+                fontsize=7,
+            )
         ax.legend(fontsize=7, loc="lower left")
         ax.grid(True, alpha=0.3)
 
     plt.suptitle(f"Per-benchmark GP degradation — {seq_name}", fontsize=12)
     plt.tight_layout()
     _save_or_show(fig, save_dir / seq_name if save_dir else None, "gp_per_bench.png")
+
+
+def _build_cl_colormap():
+    """Build a custom colormap for CL heatmaps.
+
+    Design: 100% = strong green (the ideal — baseline preserved).
+    Drops below 100 go green → yellow → orange → red.
+    Values above ~120 shift green → teal → blue for outliers.
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+
+    # (position in 0–1 range, color)
+    # vmin=0, vmax=200  →  pos 0.0=0%, 0.50=100%, 1.0=200%
+    _colors = [
+        (0.000, "#67000d"),  #   0% — deep red (catastrophic forgetting)
+        (0.250, "#d73027"),  #  50% — red
+        (0.375, "#fc8d59"),  #  75% — orange
+        (0.440, "#fee08b"),  #  88% — yellow (noticeable drop)
+        (0.480, "#d9ef8b"),  #  96% — yellow-green (slight drop)
+        (0.500, "#1a9850"),  # 100% — strong green (baseline = ideal)
+        (0.550, "#1a9850"),  # 110% — still strong green
+        (0.600, "#66bd63"),  # 120% — green
+        (0.750, "#225ea8"),  # 150% — blue (unusual high)
+        (1.000, "#0c2c84"),  # 200% — deep blue (extreme outlier)
+    ]
+    cmap = LinearSegmentedColormap.from_list(
+        "cl_heatmap",
+        [(pos, col) for pos, col in _colors],
+        N=256,
+    )
+    cnorm = plt.Normalize(vmin=0, vmax=200)
+    return cmap, cnorm
 
 
 def plot_heatmap(run: dict, save_dir: Path | None) -> None:
@@ -358,11 +438,15 @@ def plot_heatmap(run: dict, save_dir: Path | None) -> None:
     # the heatmap to 1 row — we want a row for every training stage.
     matrix_stages = sorted({e.get("stage", 0) for e in matrix if e.get("stage", 0) > 0})
     series_stages = sorted(s for s in series if s > 0)
-    train_stages  = sorted(set(matrix_stages) | set(series_stages))
+    train_stages = sorted(set(matrix_stages) | set(series_stages))
     if not train_stages:
-        train_stages = sorted(series.keys())  # fallback: include stage 0 if that's all we have
+        train_stages = sorted(
+            series.keys()
+        )  # fallback: include stage 0 if that's all we have
     if not train_stages:
-        print(f"  [skip heatmap] {run['method']}: no stage data in matrix or stage records")
+        print(
+            f"  [skip heatmap] {run['method']}: no stage data in matrix or stage records"
+        )
         return
 
     n_rows = len(train_stages)
@@ -388,10 +472,12 @@ def plot_heatmap(run: dict, save_dir: Path | None) -> None:
                 raw_I[row, tasks_ordered.index(task)] = score
 
     # Diagonal baseline: score on task t right after it was trained
-    diag_base = np.array([
-        raw_I[i, i] if i < n_rows and not np.isnan(raw_I[i, i]) else np.nan
-        for i in range(n_tasks)
-    ])
+    diag_base = np.array(
+        [
+            raw_I[i, i] if i < n_rows and not np.isnan(raw_I[i, i]) else np.nan
+            for i in range(n_tasks)
+        ]
+    )
     norm_I = np.full_like(raw_I, np.nan)
     for row in range(n_rows):
         for col in range(min(n_tasks, row + 1)):
@@ -430,11 +516,17 @@ def plot_heatmap(run: dict, save_dir: Path | None) -> None:
     # Baseline for GP/IP: stage 0 if available (pre-training), else first training stage
     base_s = 0 if 0 in series else train_stages[0]
     gp_base = np.array(
-        [series[base_s]["gp_per"].get(k) if base_s in series else np.nan for k in gp_keys],
+        [
+            series[base_s]["gp_per"].get(k) if base_s in series else np.nan
+            for k in gp_keys
+        ],
         dtype=float,
     )
     ip_base = np.array(
-        [series[base_s]["ip_per"].get(k) if base_s in series else np.nan for k in ip_keys],
+        [
+            series[base_s]["ip_per"].get(k) if base_s in series else np.nan
+            for k in ip_keys
+        ],
         dtype=float,
     )
 
@@ -446,35 +538,51 @@ def plot_heatmap(run: dict, save_dir: Path | None) -> None:
                 out[:, col] = raw[:, col] / b * 100
         return out
 
-    norm_II  = _norm(gp_raw[:, :len(gp_keys)], gp_base)
-    norm_III = _norm(ip_raw[:, :len(ip_keys)], ip_base)
+    norm_II = _norm(gp_raw[:, : len(gp_keys)], gp_base)
+    norm_III = _norm(ip_raw[:, : len(ip_keys)], ip_base)
 
     # ── Assemble panels ──────────────────────────────────────────────────
     panels = []
     if n_tasks > 0 and not np.all(np.isnan(norm_I[:, :n_tasks])):
-        panels.append({
-            "title":    "Trained Task Eval",
-            "data":     norm_I[:, :n_tasks],
-            "cols":     task_short,
-            "baseline": [f"{diag_base[j] * 100:.1f}" if not np.isnan(diag_base[j]) else ""
-                         for j in range(n_tasks)],
-        })
+        panels.append(
+            {
+                "title": "Trained Task Eval",
+                "data": norm_I[:, :n_tasks],
+                "cols": task_short,
+                "baseline": [
+                    f"{diag_base[j] * 100:.1f}" if not np.isnan(diag_base[j]) else ""
+                    for j in range(n_tasks)
+                ],
+            }
+        )
     if gp_keys and not np.all(np.isnan(norm_II)):
-        panels.append({
-            "title":    "General Task Eval (GP)",
-            "data":     norm_II,
-            "cols":     gp_keys,
-            "baseline": [f"{gp_base[j] * 100:.1f}" if j < len(gp_base) and not np.isnan(gp_base[j]) else ""
-                         for j in range(len(gp_keys))],
-        })
+        panels.append(
+            {
+                "title": "General Task Eval (GP)",
+                "data": norm_II,
+                "cols": gp_keys,
+                "baseline": [
+                    f"{gp_base[j] * 100:.1f}"
+                    if j < len(gp_base) and not np.isnan(gp_base[j])
+                    else ""
+                    for j in range(len(gp_keys))
+                ],
+            }
+        )
     if ip_keys and not np.all(np.isnan(norm_III)):
-        panels.append({
-            "title":    "In-Context Eval (IP)",
-            "data":     norm_III,
-            "cols":     ip_keys,
-            "baseline": [f"{ip_base[j] * 100:.1f}" if j < len(ip_base) and not np.isnan(ip_base[j]) else ""
-                         for j in range(len(ip_keys))],
-        })
+        panels.append(
+            {
+                "title": "In-Context Eval (IP)",
+                "data": norm_III,
+                "cols": ip_keys,
+                "baseline": [
+                    f"{ip_base[j] * 100:.1f}"
+                    if j < len(ip_base) and not np.isnan(ip_base[j])
+                    else ""
+                    for j in range(len(ip_keys))
+                ],
+            }
+        )
 
     if not panels:
         print(f"  [skip heatmap] {run['method']}: insufficient data for any panel")
@@ -482,15 +590,19 @@ def plot_heatmap(run: dict, save_dir: Path | None) -> None:
 
     widths = [max(len(p["cols"]), 1) for p in panels]
     fig, axes = plt.subplots(
-        1, len(panels),
+        1,
+        len(panels),
         figsize=(max(sum(widths) * 1.6 + 2, 8), max(n_rows * 0.8 + 2.5, 4)),
         gridspec_kw={"width_ratios": widths, "wspace": 0.5},
     )
     if len(panels) == 1:
         axes = [axes]
 
-    cmap  = plt.get_cmap("RdYlGn")   # red = worse than baseline, green = better
-    cnorm = plt.Normalize(vmin=60, vmax=120)
+    # ── Custom colormap ──────────────────────────────────────────────────
+    # 100% = strong green (ideal — baseline preserved)
+    # Below 100: green → yellow → orange → red (forgetting)
+    # Above 120: green → teal → blue (outlier gains)
+    cmap, cnorm = _build_cl_colormap()
     last_im = None
 
     for ax, panel in zip(axes, panels):
@@ -516,9 +628,22 @@ def plot_heatmap(run: dict, save_dir: Path | None) -> None:
             for j in range(data.shape[1]):
                 v = data[i, j]
                 if not np.isnan(v):
-                    txt_color = "white" if (v < 72 or v > 112) else "black"
-                    ax.text(j, i, f"{v:.0f}", ha="center", va="center",
-                            fontsize=7, color=txt_color)
+                    # White text on dark cells (deep red or deep green/blue)
+                    if v < 60 or v > 140:
+                        txt_color = "white"
+                    elif v > 95 and v < 110:
+                        txt_color = "white"  # on the strong green band
+                    else:
+                        txt_color = "black"
+                    ax.text(
+                        j,
+                        i,
+                        f"{v:.0f}",
+                        ha="center",
+                        va="center",
+                        fontsize=7,
+                        color=txt_color,
+                    )
 
     plt.colorbar(last_im, ax=axes[-1], fraction=0.046, pad=0.04, label="% of baseline")
     short = _strip_common_suffix([run["method"]])[0]
@@ -543,22 +668,46 @@ def _save_or_show(fig: plt.Figure, save_dir: Path | None, filename: str) -> None
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
-    p = argparse.ArgumentParser(description="Plot GP/IP degradation curves across CL stages.")
-    p.add_argument("--seq", default=None,
-                   help="Sequence name (e.g. NI-Seq-Opposite-v4). Omit to process all sequences.")
-    p.add_argument("--metric", nargs="+", default=["gp", "ip"],
-                   choices=["gp", "ip", "per_benchmark"],
-                   help="What to plot. 'per_benchmark' shows one subplot per benchmark.")
-    p.add_argument("--method", nargs="+", default=None,
-                   help="Filter to methods whose name contains any of these strings")
-    p.add_argument("--heatmap", action="store_true",
-                   help="Plot paper-style 3-panel heatmap (trained tasks + GP/IP benchmarks)")
-    p.add_argument("--rank", default=None,
-                   help="Filter to a specific rank (e.g. r64, r128). "
-                        "If omitted, all ranks are plotted in separate subdirectories.")
-    p.add_argument("--save", type=Path, default=None,
-                   help="Directory to save plots as .png (default: show interactively)")
+    p = argparse.ArgumentParser(
+        description="Plot GP/IP degradation curves across CL stages."
+    )
+    p.add_argument(
+        "--seq",
+        default=None,
+        help="Sequence name (e.g. NI-Seq-Opposite-v4). Omit to process all sequences.",
+    )
+    p.add_argument(
+        "--metric",
+        nargs="+",
+        default=["gp", "ip"],
+        choices=["gp", "ip", "per_benchmark"],
+        help="What to plot. 'per_benchmark' shows one subplot per benchmark.",
+    )
+    p.add_argument(
+        "--method",
+        nargs="+",
+        default=None,
+        help="Filter to methods whose name contains any of these strings",
+    )
+    p.add_argument(
+        "--heatmap",
+        action="store_true",
+        help="Plot paper-style 3-panel heatmap (trained tasks + GP/IP benchmarks)",
+    )
+    p.add_argument(
+        "--rank",
+        default=None,
+        help="Filter to a specific rank (e.g. r64, r128). "
+        "If omitted, all ranks are plotted in separate subdirectories.",
+    )
+    p.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        help="Directory to save plots as .png (default: show interactively)",
+    )
     return p.parse_args()
 
 
@@ -593,8 +742,10 @@ def main():
 
         full_curve = [r for r in runs if len(_stage_series(r)) > 1]
         final_only = [r for r in runs if len(_stage_series(r)) == 1]
-        print(f"\nRank={rank}: {len(full_curve)} run(s) with full curves, "
-              f"{len(final_only)} run(s) final-only")
+        print(
+            f"\nRank={rank}: {len(full_curve)} run(s) with full curves, "
+            f"{len(final_only)} run(s) final-only"
+        )
 
         by_seq: dict[str, list[dict]] = defaultdict(list)
         for r in runs:

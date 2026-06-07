@@ -75,18 +75,29 @@ def load_base_model(
     device_map: str = "auto",
 ):
     local = Path(model_name).is_dir()
+    # [2GPU-B] Optional override to pin the ENTIRE model onto one device. With
+    # CL_LORA_FORCE_DEVICE=N we load WITHOUT any device_map (no accelerate dispatch
+    # hooks) and move the whole model onto cuda:N explicitly. This guarantees a
+    # single-device model -> HF Trainer trains single-GPU (fast) and the naive
+    # model-parallel dispatch overhead is gone. The slice-init grad accumulator
+    # still uses the OTHER visible GPU (see compute.py buffer_device).
+    _force = os.environ.get("CL_LORA_FORCE_DEVICE")
+    force_single = _force is not None and _force != ""
     kwargs: dict = dict(
         torch_dtype=torch_dtype,
-        device_map=device_map,
         token=hf_token,
         local_files_only=local,
     )
+    kwargs["device_map"] = None if force_single else device_map
     try:
         import flash_attn  # noqa: F401
         kwargs["attn_implementation"] = "flash_attention_2"
     except ImportError:
         pass
     model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+    if force_single:
+        model = model.to(f"cuda:{int(_force)}")
+        print(f"[load_base_model] forced single device cuda:{int(_force)} (no device_map dispatch)")
 
     # Report which attention implementation is actually in use.
     attn_used = getattr(model.config, "_attn_implementation", None)
@@ -344,6 +355,8 @@ def train_on_task(
     per_device_train_batch_size: int = 16,
     per_device_eval_batch_size: int = 8,
     gradient_accumulation_steps: int = 2,
+    gradient_checkpointing: bool = False,
+    torch_compile: bool = False,
     logging_steps: int = 50,
     save_steps: int = 500,
     eval_steps: int = 500,
@@ -379,6 +392,8 @@ def train_on_task(
     slice_nullspace_rank: int = 8,
     slice_nullspace_sv_threshold: float = 0.0,
     slice_svd_selection: str = "lora_ga",
+    slice_micro_batch_size: int | None = None,
+    slice_batch_size: int | None = None,
     cl_method: CLMethod | None = None,
     stage_idx: int = 1,
     sapt_mode: bool = False,
@@ -413,6 +428,16 @@ def train_on_task(
         active_adapter = "default"
     lora_model.print_trainable_parameters()
 
+    # [2GPU-B] The model is pinned to a single GPU (CL_LORA_FORCE_DEVICE), but we keep
+    # a 2nd GPU visible ONLY for the slice-init grad accumulator. HF Trainer would
+    # otherwise see n_gpu>1 and wrap the model in nn.DataParallel (replicating it
+    # across both GPUs + splitting batches -> slow, not single-GPU). Marking the model
+    # model-parallel makes Trainer set _n_gpu=1 and skip DataParallel entirely
+    # (transformers/trainer.py: is_model_parallel -> args._n_gpu = 1).
+    if os.environ.get("CL_LORA_FORCE_DEVICE") not in (None, "") and torch.cuda.device_count() > 1:
+        lora_model.is_parallelizable = True
+        lora_model.model_parallel = True
+
     if slice_enabled:
         model_id = (
             getattr(getattr(model, "config", None), "_name_or_path", None)
@@ -422,7 +447,12 @@ def train_on_task(
             cache_dir=slice_cache_dir,
             cache_context=slice_cache_context or (str(model_id) if model_id else None),
             max_steps=slice_max_steps,
-            per_device_batch_size=per_device_train_batch_size,
+            # Slice-init gradient batch defaults to the training batch, but can be
+            # set independently (e.g. to match a reference recipe) without changing
+            # the optimizer's effective training batch.
+            per_device_batch_size=(
+                slice_batch_size if slice_batch_size is not None else per_device_train_batch_size
+            ),
             seed=seed,
             retain_scale=slice_retain_scale,
             grad_project=slice_grad_project,
@@ -448,6 +478,7 @@ def train_on_task(
             nullspace_sv_threshold=slice_nullspace_sv_threshold,
             svd_selection=slice_svd_selection,
             skip_absorption=bool(sapt_mode),
+            micro_batch_size=slice_micro_batch_size,
         )
         # propagate PEFT lora settings into slice config when available
         try:
@@ -507,6 +538,9 @@ def train_on_task(
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_checkpointing=gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if gradient_checkpointing else None,
+        torch_compile=torch_compile,
         learning_rate=learning_rate,
         num_train_epochs=num_train_epochs,
         logging_steps=logging_steps,

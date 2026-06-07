@@ -124,12 +124,18 @@ def compute_slice_inits(
     )
 
     device = model_device(model)
+    # [2GPU-B] Put the slice-init grad accumulator on a second GPU when available,
+    # so the model GPU keeps headroom for activations + transient param.grad.
+    # This is a pure device placement (exact copies); the gradient values are
+    # identical to single-GPU accumulation. SVD is moved back to `device` below.
+    buffer_device = torch.device("cuda:1") if torch.cuda.device_count() > 1 else device
     grads_f, steps_f = accumulate_gradients(
         model=model,
         dataloader=forget_loader,
         target_params=target_params,
         device=device,
         max_steps=config.max_steps,
+        accum_device=buffer_device,
     )
     logger.info("Collected forget gradients: steps=%d modules=%d", steps_f, len(grads_f))
     for i, (n, g) in enumerate(grads_f.items()):
@@ -169,9 +175,10 @@ def compute_slice_inits(
             grads_r, steps_r = accumulate_gradients(
                 model=model, dataloader=retain_loader, target_params=target_params,
                 device=device, max_steps=retain_max_steps,
+                accum_device=buffer_device,
             )
         elif config.retain_batch_size_set == "each_task":
-            grads_r = {name: torch.zeros_like(param, device=device) for name, param in target_params.items()}
+            grads_r = {name: torch.zeros_like(param, device=buffer_device) for name, param in target_params.items()}
             steps_r = 0
             for rt in retain_tasks:
                 rt_name = getattr(rt, "name", str(rt))
@@ -182,9 +189,15 @@ def compute_slice_inits(
                 grads_rt, steps_rt = accumulate_gradients(
                     model=model, dataloader=rt_loader, target_params=target_params,
                     device=device, max_steps=retain_max_steps,
+                    accum_device=buffer_device,
                 )
+                # [2GPU-B] add in-place and free the per-task buffer immediately so the
+                # accumulator GPU holds at most forget + retain + ONE task buffer
+                # (never the un-freed leftover that caused the stage-2 OOM).
                 for name in grads_r:
-                    grads_r[name] = grads_r[name] + grads_rt[name]
+                    grads_r[name].add_(grads_rt[name])
+                del grads_rt
+                torch.cuda.empty_cache()
                 steps_r += steps_rt
                 logger.info("Accumulated retain grads for task=%s: steps=%d", rt_name, steps_rt)
         else:
@@ -199,11 +212,15 @@ def compute_slice_inits(
                 break
             logger.debug("retain grad sample: module=%s norm=%.6g", n, float(g.norm().item()))
 
+    # [2GPU-B] in-place division (grads now live on CPU) to avoid building a second
+    # full-size copy of every buffer.
     denom_f = max(1, steps_f)
-    grads_f = {k: v / float(denom_f) for k, v in grads_f.items()}
+    for k in grads_f:
+        grads_f[k].div_(float(denom_f))
     if grads_r is not None:
         denom_r = max(1, steps_r)
-        grads_r = {k: v / float(denom_r) for k, v in grads_r.items()}
+        for k in grads_r:
+            grads_r[k].div_(float(denom_r))
 
     if config.grad_project and grads_r is not None:
         method = str(config.projection_method).lower()
@@ -279,9 +296,19 @@ def compute_slice_inits(
             "gamma": None,
         }
 
+    # [2GPU-B] release the raw forget/retain buffers before the SVD loop; only
+    # `combined` is needed from here. For paths where `combined` aliases grads_f
+    # (e.g. lora_ga / no-projection) the tensors stay alive via `combined`.
+    del grads_f, grads_r
+    torch.cuda.empty_cache()
+
     r_use = config.rank or int(getattr(lora_cfg, "r", 8))
     inits = {}
     for name, g in combined.items():
+        # [2GPU-B] grads were accumulated on buffer_device; move each module's
+        # gradient back to the model device for SVD so the decomposition runs on
+        # the same device as the 3B single-GPU pipeline (one module at a time).
+        g = g.to(device)
         logger.debug("Building A/B for module %s: G_shape=%s r=%d", name, tuple(g.shape), r_use)
         weight_var = float(target_params[name].detach().float().var().item())
         ab = build_ab_from_gradient(
