@@ -54,6 +54,7 @@ SYNC_STAGE_RECORDS   = True
 
 RANK128_RESULTS     = Path("/mnt/D-SSD/cl-lora-ramiro/results")
 B_SSD_RESULTS       = Path("/mnt/B-SSD/jmpasquali/fix-cl-lora/cl-lora/results")
+RESULTS_8B          = Path("results_8b")   # local 8B (Llama-3.1-8B) runs
 ALPHA_SWEEP_RESULTS = Path("/mnt/D-SSD/slice-neurips2026-cache/alpha_sweep")
 CL_BASELINES_ROOTS = [
     Path("/mnt/E-SSD/cl-baselines/cl-lora/results/TRACE/basic_methods"),
@@ -744,8 +745,10 @@ def parse_args():
     p.add_argument("--no-analyse", action="store_true",
                    help="Skip analysis (useful with --sync to only fetch data)")
     p.add_argument("--roots", nargs="+",
-                   default=["imported_results", str(PENDING_EVAL_LOCAL), str(MOTOX_RESULTS), str(B_SSD_RESULTS), str(ALPHA_SWEEP_RESULTS)],
+                   default=["imported_results", str(PENDING_EVAL_LOCAL), str(B_SSD_RESULTS), str(ALPHA_SWEEP_RESULTS)],
                    help="Local folders to scan for results (tagged as r64)")
+    p.add_argument("--8b-root", type=Path, default=RESULTS_8B,
+                   help="Root dir for 8B results (no rank tag appended — run names already encode it); set to '' to disable")
     p.add_argument("--rank128-root", type=Path, default=RANK128_RESULTS,
                    help="Root dir for rank-128 results (tagged as r128); set to '' to disable")
     p.add_argument("--cl-baselines-roots", nargs="+", type=Path, default=CL_BASELINES_ROOTS,
@@ -785,6 +788,8 @@ def main():
     ]
     if args.rank128_root and str(args.rank128_root):
         roots_with_tags.append((args.rank128_root, "r128"))
+    if getattr(args, "8b_root", None) and str(getattr(args, "8b_root")):
+        roots_with_tags.append((getattr(args, "8b_root"), None))
     for p in (args.cl_baselines_roots or []):
         if str(p):
             roots_with_tags.append((p, None))

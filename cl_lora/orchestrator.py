@@ -218,7 +218,7 @@ def run_sequence(
     save_final_model: bool,
     resume: bool,
     rank: int,
-    lora_alpha: int,
+    lora_alpha: float,
     slice_enabled: bool,
     slice_cache_dir: str,
     slice_max_steps: int,
@@ -245,6 +245,9 @@ def run_sequence(
     slice_svd_selection: str = "lora_ga",
     per_device_train_batch_size: int = 16,
     gradient_accumulation_steps: int = 2,
+    learning_rate: float = 1e-4,
+    warmup_ratio: float = 0.01,
+    lr_scheduler_type: str = "linear",
     gradient_checkpointing: bool = False,
     torch_compile: bool = False,
     slice_micro_batch_size: int | None = None,
@@ -277,7 +280,7 @@ def run_sequence(
         "task_eval_samples": int(task_eval_samples),
         "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
         "rank": int(rank),
-        "lora_alpha": int(lora_alpha),
+        "lora_alpha": float(lora_alpha),
         "slice_enabled": bool(slice_enabled),
         "slice_cache_dir": slice_cache_dir,
         "slice_max_steps": int(slice_max_steps),
@@ -481,6 +484,9 @@ def run_sequence(
             lora_alpha=lora_alpha,
             per_device_train_batch_size=per_device_train_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
+            learning_rate=learning_rate,
+            warmup_ratio=warmup_ratio,
+            lr_scheduler_type=lr_scheduler_type,
             gradient_checkpointing=gradient_checkpointing,
             torch_compile=torch_compile,
             slice_micro_batch_size=slice_micro_batch_size,
@@ -751,7 +757,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--lora-alpha",
-        type=int,
+        type=float,
         default=2,
         help="LoRA alpha (rsLoRA scaling = alpha / sqrt(r)). Defaults to 2.",
     )
@@ -766,6 +772,24 @@ def main() -> None:
         type=int,
         default=2,
         help="Gradient accumulation steps passed to the HF Trainer.",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=1e-4,
+        help="Per-task training learning rate passed to the HF Trainer.",
+    )
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.01,
+        help="Fraction of total training steps used for LR warmup (HF Trainer).",
+    )
+    parser.add_argument(
+        "--lr-scheduler-type",
+        default="linear",
+        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+        help="LR scheduler type passed to the HF Trainer (default: linear).",
     )
     parser.add_argument(
         "--gradient-checkpointing",
@@ -968,6 +992,9 @@ def main() -> None:
         lora_alpha=args.lora_alpha,
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
+        warmup_ratio=args.warmup_ratio,
+        lr_scheduler_type=args.lr_scheduler_type,
         gradient_checkpointing=args.gradient_checkpointing,
         torch_compile=args.torch_compile,
         slice_micro_batch_size=args.slice_micro_batch_size,

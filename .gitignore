@@ -14,10 +14,19 @@ slice_cache/
 imported_results/
 imported_results_pending/
 figs/
-
+figs_1/
+gp_plots/
+tables_4/
 .vscode/
 outputs/
-
+plots_save/
+plots_j/
+figures/
+results_8b/
+outputs_8b/
+scripts/
+docs/
+todo.md
 # C extensions
 *.so
 z/
