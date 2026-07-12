@@ -24,13 +24,13 @@ import logging
 
 try:
     from .cl_methods import CLMethod, VanillaCLMethod
-    from .load_dataset import load_training_dataset
+    from .load_dataset import configure_prompt_tokenizer, load_training_dataset
     from .lora_config import build_lora_config
     from .repro import set_global_seed
     from .slice import SliceInitConfig, initialize_lora_with_slice
 except ImportError:
     from cl_methods import CLMethod, VanillaCLMethod  # type: ignore[no-redef]
-    from load_dataset import load_training_dataset
+    from load_dataset import configure_prompt_tokenizer, load_training_dataset  # type: ignore[no-redef]
     from lora_config import build_lora_config
     from repro import set_global_seed
     from slice import SliceInitConfig, initialize_lora_with_slice  # type: ignore[no-redef]
@@ -54,7 +54,8 @@ _patch_accelerate_unwrap_model_compat()
 
 load_dotenv()
 
-MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
+MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
+# MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 # MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 HF_TOKEN = os.getenv("HUGGING_TOKEN")
 
@@ -65,6 +66,9 @@ def build_tokenizer(model_name: str = MODEL_NAME, hf_token: str | None = HF_TOKE
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
+    # Render prompts/targets with this model's native chat template (and its real
+    # EOS) for every downstream load_training_dataset call in this process.
+    configure_prompt_tokenizer(tokenizer)
     return tokenizer
 
 
@@ -249,6 +253,7 @@ def train_on_task(
     lora_alpha: int = 2,
     learning_rate: float = 1e-4,
     num_train_epochs: float = 3.0,
+    warmup_ratio: float = 0.01,
     per_device_train_batch_size: int = 16,
     per_device_eval_batch_size: int = 8,
     gradient_accumulation_steps: int = 2,
@@ -305,6 +310,7 @@ def train_on_task(
     active_adapter = "default"
     lora_model.print_trainable_parameters()
 
+    slice_projection_summary: dict | None = None
     if slice_enabled:
         model_id = (
             getattr(getattr(model, "config", None), "_name_or_path", None)
@@ -346,7 +352,7 @@ def train_on_task(
         except Exception:
             pass
         logger = logging.getLogger("cl_lora.train.slice")
-        num_written = initialize_lora_with_slice(
+        num_written, slice_projection_summary = initialize_lora_with_slice(
             model=lora_model,
             tokenizer=tokenizer,
             current_task=task,
@@ -396,7 +402,7 @@ def train_on_task(
         logging_steps=logging_steps,
         save_strategy="steps" if save_intermediate_checkpoints else "no",
         save_steps=save_steps,
-        warmup_ratio=0.01,
+        warmup_ratio=warmup_ratio,
         save_total_limit=2 if save_intermediate_checkpoints else None,
         eval_strategy="steps",
         eval_steps=eval_steps,
@@ -492,6 +498,7 @@ def train_on_task(
             "rank": int(rank),
             "use_rslora": True,
         },
+        "slice_projection": slice_projection_summary,
         "output_dir": str(output_path),
         "configs": {
             "seed": int(seed),

@@ -15,10 +15,17 @@ def accumulate_gradients(
     target_params: Dict[str, torch.nn.Parameter],
     device: torch.device,
     max_steps: int,
+    grads: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Tuple[Dict[str, torch.Tensor], int]:
-    grads: Dict[str, torch.Tensor] = {
-        name: torch.zeros_like(param, device=device) for name, param in target_params.items()
-    }
+    # When `grads` is provided, accumulate into it in place instead of allocating a
+    # fresh full-size buffer. This lets a caller sum gradients across several
+    # dataloaders (e.g. one retain task at a time) without ever holding more than
+    # one retain-gradient set resident -- identical result to summing per-task
+    # buffers, but one full gradient set (~model-sized) lighter at peak.
+    if grads is None:
+        grads = {
+            name: torch.zeros_like(param, device=device) for name, param in target_params.items()
+        }
 
     # PEFT freezes base weights (requires_grad=False) so backward would
     # skip them and .grad would stay None.  Temporarily re-enable so we

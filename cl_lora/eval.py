@@ -289,9 +289,11 @@ def _evaluate_alpaca_rouge_l(
                 eos_token_id=tokenizer.eos_token_id,
             )
 
-            prompt_lengths = encoded["attention_mask"].sum(dim=1).tolist()
+            # Left padding: generated tokens start at the padded input width for
+            # every row (see _evaluate_task_with_generation for the rationale).
+            input_len = encoded["input_ids"].shape[1]
             for i, ref in enumerate(batch_refs):
-                continuation_ids = outputs[i, int(prompt_lengths[i]) :]
+                continuation_ids = outputs[i, input_len:]
                 prediction = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
                 rouge_scores.append(_rouge_l_f1(prediction, ref))
 
@@ -462,9 +464,14 @@ def _evaluate_task_with_generation(
                 eos_token_id=tokenizer.eos_token_id,
             )
 
-            prompt_lengths = encoded["attention_mask"].sum(dim=1).tolist()
+            # With left padding (see _left_padding_for_generation), every row's
+            # input occupies the full padded width and the newly generated tokens
+            # start at that width. Slicing by attention_mask.sum() (the right-pad
+            # idiom) would start inside the prompt and decode the prompt back as
+            # the "prediction"; slice from the padded input length instead.
+            input_len = encoded["input_ids"].shape[1]
             for i, target in enumerate(batch_targets):
-                continuation_ids = outputs[i, int(prompt_lengths[i]) :]
+                continuation_ids = outputs[i, input_len:]
                 prediction = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
                 ref = str(target).strip()
 

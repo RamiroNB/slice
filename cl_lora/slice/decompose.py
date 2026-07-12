@@ -30,6 +30,9 @@ def build_ab_from_gradient(
         raise ValueError("Invalid rank for slice initialization")
 
     U, _, V = torch.svd_lowrank(G32, q=q, niter=4)
+    # The full-size fp32 copy of the gradient is no longer needed once the
+    # low-rank factors are out.
+    del G32
 
     Vt = V.t()
     if svd_selection == "lora_ga":
@@ -48,6 +51,8 @@ def build_ab_from_gradient(
     eps = 1e-12
     recon = B @ A
     var_recon = float(torch.var(recon).item()) if torch.var(recon).item() != 0.0 else eps
+    # `recon` is a full d_out x d_in fp32 tensor; only its variance is needed.
+    del recon
     variance_ratio = float(weight_var) / (var_recon + eps)
     min_dim = max(2, min(d_out, d_in))
     r_val = max(2, r)

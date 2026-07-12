@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from typing import Any, Dict, Optional, List, Tuple
 
@@ -179,12 +180,15 @@ def compute_slice_inits(
                 ds = tokenize_dataset(ds, tokenizer=tokenizer, max_length=config.max_seq_length)
                 logger.info("Retain dataloader (each_task): task=%s, %d samples, batch_size=%d", rt_name, len(ds), retain_bs)
                 rt_loader = build_dataloader(ds, tokenizer=tokenizer, batch_size=retain_bs, seed=config.seed)
-                grads_rt, steps_rt = accumulate_gradients(
+                # Accumulate this task's gradients straight into the shared retain
+                # buffer (one task at a time) so we never hold a second full-size
+                # gradient set. Summing in place is numerically identical to the
+                # previous per-task buffer + add, preserving each_task's effective
+                # batch size and per-task weighting.
+                grads_r, steps_rt = accumulate_gradients(
                     model=model, dataloader=rt_loader, target_params=target_params,
-                    device=device, max_steps=retain_max_steps,
+                    device=device, max_steps=retain_max_steps, grads=grads_r,
                 )
-                for name in grads_r:
-                    grads_r[name] = grads_r[name] + grads_rt[name]
                 steps_r += steps_rt
                 logger.info("Accumulated retain grads for task=%s: steps=%d", rt_name, steps_rt)
         else:
@@ -309,6 +313,88 @@ def _task_fingerprint(task_obj) -> Optional[Dict[str, object]]:
     return fp
 
 
+def summarize_projection_stats(projection_stats: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact summary of one stage's gradient projection, for the run's stage report.
+
+    The full per-module `projection_stats` only lives in the slice_cache; this
+    distills it to a handful of scalars that ride along next to `ba_norms` in the
+    results folder, so the projection record survives cache pruning.
+
+    Handles both stats formats:
+      - OGD-style `project_current_gradients`: global has dot/denom/gamma.
+      - advanced `project_gradients_advanced`: global has cos/do_project/gamma.
+
+    `rel_change` is the global relative change ||g_proj - g_c|| / ||g_c||. For the
+    single-global-gamma path (g_proj = g_c + gamma*g_r) this is exact:
+    |gamma| * sqrt(sum ||g_r||^2) / sqrt(sum ||g_c||^2).
+    """
+    if not isinstance(projection_stats, dict):
+        return {"applied": False, "reason": "no_stats", "fired": False}
+
+    g = projection_stats.get("global") or {}
+    mods = projection_stats.get("modules") or {}
+    gamma = g.get("gamma")
+
+    if "do_project" in g:
+        fired = bool(g.get("do_project"))
+    elif gamma is not None:
+        fired = float(gamma) > 0.0
+    else:
+        fired = False
+
+    sum_cur2 = 0.0
+    sum_ret2 = 0.0
+    n_conflict = 0
+    n_total = 0
+    for m in mods.values():
+        if not isinstance(m, dict):
+            continue
+        n_total += 1
+        cn = m.get("current_norm")
+        rn = m.get("retain_norm")
+        if cn:
+            sum_cur2 += float(cn) ** 2
+        if rn:
+            sum_ret2 += float(rn) ** 2
+        d = m.get("dot")
+        if d is not None and float(d) < 0.0:
+            n_conflict += 1
+
+    rel_change = None
+    if gamma is not None and sum_cur2 > 0.0:
+        rel_change = abs(float(gamma)) * math.sqrt(sum_ret2) / math.sqrt(sum_cur2)
+
+    return {
+        "applied": bool(projection_stats.get("applied", False)),
+        "reason": projection_stats.get("reason"),
+        "method": projection_stats.get("method"),
+        "mode": projection_stats.get("mode"),
+        "fired": fired,
+        "gamma": None if gamma is None else float(gamma),
+        "cos": g.get("cos"),
+        "dot": g.get("dot", g.get("sum_dot")),
+        "rel_change": rel_change,
+        "n_modules_conflict": n_conflict,
+        "n_modules_total": n_total,
+    }
+
+
+def _load_projection_summary(cache_root: str) -> Optional[Dict[str, Any]]:
+    """Summarize a stage's projection_stats.json from the cache dir.
+
+    Used on a cache hit, where the full stats are not recomputed in memory but the
+    JSON is present in the cache entry. Returns None if the file is absent.
+    """
+    path = os.path.join(cache_root, "projection_stats.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return summarize_projection_stats(json.load(f))
+    except (OSError, ValueError):
+        return None
+
+
 def load_or_compute_slice_inits(
     model: torch.nn.Module,
     tokenizer,
@@ -316,7 +402,7 @@ def load_or_compute_slice_inits(
     retain_tasks,
     *,
     config: SliceInitConfig,
-) -> Tuple[Dict[str, Dict[str, torch.Tensor]], str]:
+) -> Tuple[Dict[str, Dict[str, torch.Tensor]], str, Optional[Dict[str, Any]]]:
     if config.init_method == "lora_ga":
         # Enforce guard before cache lookup so incompatible settings cannot be hidden by cache hits.
         invalid_flags = _lora_ga_incompatible_flags(config)
@@ -372,6 +458,10 @@ def load_or_compute_slice_inits(
         "lora": lora_payload,
         "model": {
             "class": model.__class__.__name__,
+            # Bump when the prompt/target rendering changes so cached gradients
+            # (which are computed from the rendered text but not hashed on it)
+            # are invalidated. v2 = native chat template + real EOS termination.
+            "prompt_format": "chat_template_v2",
         },
     }
     cache_key = make_cache_key(payload)
@@ -380,7 +470,7 @@ def load_or_compute_slice_inits(
     if cached is not None:
         save_ab_stats_csv(config.cache_dir, cache_key, cached.inits)
         logger.info("Slice cache hit: cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(cached.inits))
-        return cached.inits, cache_root
+        return cached.inits, cache_root, _load_projection_summary(cache_root)
     logger.info("Slice cache miss: will compute inits (cache_dir=%s cache_key=%s)", config.cache_dir, cache_key)
 
     if config.init_method == "loram":
@@ -408,4 +498,4 @@ def load_or_compute_slice_inits(
     save_ab_stats_csv(config.cache_dir, cache_key, inits)
     save_projection_stats_json(config.cache_dir, cache_key, projection_stats)
     logger.info("Computed slice inits (not persisted): cache_dir=%s cache_key=%s modules=%d", config.cache_dir, cache_key, len(inits))
-    return inits, cache_root
+    return inits, cache_root, summarize_projection_stats(projection_stats)

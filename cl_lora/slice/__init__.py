@@ -13,9 +13,16 @@ def initialize_lora_with_slice(
     *,
     config: SliceInitConfig,
     adapter_name: str = "default",
-) -> int:
+) -> tuple[int, dict | None]:
+    """Apply slice init. Returns (num_modules_written, projection_summary).
+
+    `projection_summary` is a compact per-stage record of the gradient projection
+    (gamma / rel_change / fired / conflict counts) suitable for storing in the run's
+    stage report so it survives cache pruning. May be None (e.g. cache hit whose
+    stats file was pruned, or non-projecting init methods).
+    """
     set_global_seed(int(config.seed))
-    inits, _cache_root = load_or_compute_slice_inits(
+    inits, _cache_root, projection_summary = load_or_compute_slice_inits(
         model=model,
         tokenizer=tokenizer,
         current_task=current_task,
@@ -26,7 +33,7 @@ def initialize_lora_with_slice(
     lora_alpha = getattr(config, "lora_alpha", 1.0)
     r_val = getattr(config, "rank", None)
     skip_abs = bool(getattr(config, "skip_absorption", False))
-    return apply_slice_inits(
+    num_written = apply_slice_inits(
         model,
         inits,
         lora_alpha=lora_alpha,
@@ -34,6 +41,7 @@ def initialize_lora_with_slice(
         skip_absorption=skip_abs,
         adapter_name=adapter_name,
     )
+    return num_written, projection_summary
 
 
 __all__ = [

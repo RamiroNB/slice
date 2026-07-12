@@ -217,6 +217,7 @@ def run_sequence(
     resume: bool,
     rank: int,
     lora_alpha: int,
+    warmup_ratio: float,
     slice_enabled: bool,
     slice_cache_dir: str,
     slice_max_steps: int,
@@ -449,6 +450,7 @@ def run_sequence(
             retain_tasks=retain_tasks,
             rank=rank,
             lora_alpha=lora_alpha,
+            warmup_ratio=warmup_ratio,
             adapter_checkpoint_path=str(adapter_checkpoint_dir),
             slice_enabled=slice_enabled,
             slice_cache_dir=slice_cache_dir,
@@ -670,6 +672,12 @@ def main() -> None:
         default=2,
         help="LoRA alpha (rsLoRA scaling = alpha / sqrt(r)). Defaults to 2.",
     )
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.01,
+        help="Warmup ratio for the LR scheduler (TrainingArguments.warmup_ratio). Defaults to 0.01.",
+    )
     parser.add_argument("--slice-grad-project", action="store_true", help="Project current-task gradients against retain gradients for slice init.")
     parser.add_argument(
         "--slice-grad-projection-mode",
@@ -817,6 +825,7 @@ def main() -> None:
         resume=args.resume,
         rank=args.rank,
         lora_alpha=args.lora_alpha,
+        warmup_ratio=args.warmup_ratio,
         slice_enabled=args.slice_init,
         slice_cache_dir=args.slice_cache_dir,
         slice_max_steps=args.slice_max_steps,

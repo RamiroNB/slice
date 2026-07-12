@@ -123,7 +123,32 @@ def _split_dataset(dataset: Dataset, eval_size: int, seed: int) -> Tuple[Dataset
     return split["train"], split["test"]
 
 
+# Tokenizer used to render prompts with the model's native chat template.
+# Configured once per process (see configure_prompt_tokenizer); when unset we
+# fall back to the legacy hard-coded Llama-3 markup for backward compatibility.
+_PROMPT_TOKENIZER = None
+
+
+def configure_prompt_tokenizer(tokenizer) -> None:
+    """Register the tokenizer whose chat template should format prompts.
+
+    Must be called before load_training_dataset so that train and eval render
+    prompts identically with the active model's template (and terminate targets
+    with the model's real EOS token, so generation stops cleanly at eval time).
+    """
+    global _PROMPT_TOKENIZER
+    _PROMPT_TOKENIZER = tokenizer
+
+
 def _build_chat_prompt(instruction_text: str) -> str:
+    tok = _PROMPT_TOKENIZER
+    if tok is not None and getattr(tok, "chat_template", None):
+        return tok.apply_chat_template(
+            [{"role": "user", "content": instruction_text}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    # Legacy fallback: hard-coded Llama-3 chat markup.
     return (
         "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
         f"{instruction_text}"
@@ -132,6 +157,12 @@ def _build_chat_prompt(instruction_text: str) -> str:
 
 
 def _build_chat_text(prompt_text: str, output_text: str) -> str:
+    tok = _PROMPT_TOKENIZER
+    if tok is not None and getattr(tok, "chat_template", None):
+        # Terminate with the model's real EOS so the model learns to stop;
+        # otherwise generation runs to max_new_tokens and trails into garbage.
+        eos = tok.eos_token or ""
+        return f"{prompt_text}{output_text}{eos}"
     return f"{prompt_text}{output_text}<|eot_id|>"
 
 
