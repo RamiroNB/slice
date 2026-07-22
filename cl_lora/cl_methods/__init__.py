@@ -10,12 +10,14 @@ from typing import Any, Dict, Type
 
 from .base import CLMethod
 from .o_lora import OLoRAMethod
+from .sd_lora import SDLoRAMethod
 from .vanilla import VanillaCLMethod
 
 
 REGISTRY: Dict[str, Type[CLMethod]] = {
     "vanilla": VanillaCLMethod,
     "o_lora": OLoRAMethod,
+    "sd_lora": SDLoRAMethod,
 }
 
 
@@ -48,6 +50,7 @@ __all__ = [
     "CLMethod",
     "OLoRAMethod",
     "REGISTRY",
+    "SDLoRAMethod",
     "VanillaCLMethod",
     "build_cl_method",
 ]
