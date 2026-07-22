@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Tuple
 import accelerate
 import torch
 from dotenv import load_dotenv
-from peft import get_peft_model
+from peft import get_peft_model, PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -181,6 +181,22 @@ def load_model_with_adapters(
     model = load_base_model(
         base_model_path, hf_token=hf_token, torch_dtype=torch_dtype, device_map=device_map
     )
+
+    # SD-LoRA checkpoints are not mergeable adapters: each stage drops a
+    # cumulative sd_lora_state.pt (frozen net-update blocks + trainable scalars)
+    # next to its adapter. Reconstruct W0 + sum_i s_i D_i by baking the state of
+    # the final stage into the pristine base weights.
+    if adapter_paths:
+        sdlora_state_path = Path(adapter_paths[-1]) / "sd_lora_state.pt"
+        if sdlora_state_path.exists():
+            try:
+                from .cl_methods.sd_lora import bake_sdlora_into_model
+            except ImportError:
+                from cl_methods.sd_lora import bake_sdlora_into_model  # type: ignore[no-redef]
+            state = torch.load(str(sdlora_state_path), map_location="cpu", weights_only=False)
+            bake_sdlora_into_model(model, state)
+            return model
+
     for adapter_path in adapter_paths:
         model = PeftModel.from_pretrained(model, adapter_path)
         init_correction_path = Path(adapter_path) / "init_correction.pt"
@@ -301,6 +317,23 @@ def train_on_task(
         (model_after_stage, training_report)
     """
     set_global_seed(seed)
+
+    # SD-LoRA (and any no-merge CL method) keeps the model wrapped across stages
+    # so previous-task directions stay live. Unwrap the incoming PeftModel back to
+    # the pristine base before starting a fresh adapter for this task.
+    sd_lora_mode = bool(getattr(cl_method, "requires_no_merge", False))
+    force_skip_absorption = bool(getattr(cl_method, "requires_skip_absorption", False))
+    if isinstance(model, PeftModel):
+        model = model.unload()
+        # unload() leaves a lingering `peft_config` attribute on the base model;
+        # drop it so the fresh get_peft_model() below doesn't warn about (or stack)
+        # multiple adapters.
+        if hasattr(model, "peft_config"):
+            try:
+                del model.peft_config
+            except AttributeError:
+                pass
+
     train_dataset, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
     train_dataset = _tokenize_dataset(train_dataset, tokenizer=tokenizer, max_length=max_seq_length)
     eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
@@ -345,6 +378,9 @@ def train_on_task(
             nullspace_rank=slice_nullspace_rank,
             nullspace_sv_threshold=slice_nullspace_sv_threshold,
             svd_selection=slice_svd_selection,
+            # SD-LoRA keeps W0 pristine (absorption is realized in the forward
+            # override), so never physically absorb into the base weights here.
+            skip_absorption=force_skip_absorption,
         )
         # propagate PEFT lora settings into slice config when available
         try:
@@ -375,6 +411,11 @@ def train_on_task(
             if isinstance(mod, LoraLinear) and active_adapter in getattr(mod, "lora_A", {})
         }
     else:
+        lora_init_correction = {}
+
+    if sd_lora_mode:
+        # SD-LoRA stores each task's init inside its frozen block and never
+        # absorbs into the base, so there is no absorption to replay at eval time.
         lora_init_correction = {}
 
     # CL-method pre-training hook (fires AFTER init_correction capture so
@@ -456,8 +497,20 @@ def train_on_task(
         if lora_init_correction:
             torch.save(lora_init_correction, adapter_cp / "init_correction.pt")
 
-    merge_fn = getattr(lora_model, "merge_and_unload", None)
-    post_stage_model = merge_fn() if callable(merge_fn) else lora_model
+    if sd_lora_mode:
+        # Persist the cumulative SD-LoRA state (frozen blocks + scalars) next to
+        # the adapter checkpoints so standalone eval can bake W0 + sum s_i D_i.
+        if save_adapter:
+            cl_method.save(str(output_path / "adapter"))
+        if adapter_checkpoint_path:
+            cl_method.save(str(Path(adapter_checkpoint_path)))
+        # Keep the override live and unmerged: the trained model already equals
+        # W0 + sum s_i D_i for in-run eval, and unload() restores a pristine base
+        # for the next stage.
+        post_stage_model = lora_model
+    else:
+        merge_fn = getattr(lora_model, "merge_and_unload", None)
+        post_stage_model = merge_fn() if callable(merge_fn) else lora_model
     trainer.save_state()
 
     def _maybe_to_dict(obj: Any) -> Any:

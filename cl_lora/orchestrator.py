@@ -740,7 +740,9 @@ def main() -> None:
         help="Continual-learning training method (composes with any LoRA init). "
              "'vanilla' (default) is the existing per-stage train+merge pipeline. "
              "'o_lora' adds an orthogonality regularizer between current and prior "
-             "task A matrices.")
+             "task A matrices. 'sd_lora' keeps every task's frozen net-update "
+             "direction live (no merge) with trainable per-task magnitude scalars "
+             "(pair with --slice-init for SD-LoRA + SLICE).")
     parser.add_argument("--cl-o-lora-lambda", type=float, default=0.5,
         help="O-LoRA orthogonality regularizer weight. Used only when --cl-method=o_lora.")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
