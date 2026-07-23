@@ -218,6 +218,10 @@ def run_sequence(
     rank: int,
     lora_alpha: int,
     warmup_ratio: float,
+    per_device_train_batch_size: int,
+    gradient_accumulation_steps: int,
+    gradient_checkpointing: bool,
+    slice_probe_batch_size: int | None,
     slice_enabled: bool,
     slice_cache_dir: str,
     slice_max_steps: int,
@@ -271,6 +275,10 @@ def run_sequence(
         "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
         "rank": int(rank),
         "lora_alpha": int(lora_alpha),
+        "per_device_train_batch_size": int(per_device_train_batch_size),
+        "gradient_accumulation_steps": int(gradient_accumulation_steps),
+        "gradient_checkpointing": bool(gradient_checkpointing),
+        "slice_probe_batch_size": slice_probe_batch_size,
         "slice_enabled": bool(slice_enabled),
         "slice_cache_dir": slice_cache_dir,
         "slice_max_steps": int(slice_max_steps),
@@ -451,6 +459,10 @@ def run_sequence(
             rank=rank,
             lora_alpha=lora_alpha,
             warmup_ratio=warmup_ratio,
+            per_device_train_batch_size=per_device_train_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            gradient_checkpointing=gradient_checkpointing,
+            slice_probe_batch_size=slice_probe_batch_size,
             adapter_checkpoint_path=str(adapter_checkpoint_dir),
             slice_enabled=slice_enabled,
             slice_cache_dir=slice_cache_dir,
@@ -678,6 +690,29 @@ def main() -> None:
         default=0.01,
         help="Warmup ratio for the LR scheduler (TrainingArguments.warmup_ratio). Defaults to 0.01.",
     )
+    parser.add_argument(
+        "--per-device-train-batch-size", type=int, default=16,
+        help="Training micro-batch size. Lower it to cut activation/logit memory; "
+             "raise --gradient-accumulation-steps to keep the effective batch fixed. "
+             "Does NOT change the init gradient probe (see --slice-probe-batch-size).",
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps", type=int, default=2,
+        help="Gradient accumulation steps. Effective batch = per-device batch x this.",
+    )
+    parser.add_argument(
+        "--gradient-checkpointing", action="store_true",
+        help="Recompute activations in backward instead of storing them. Large memory "
+             "saving for ~20-30%% slowdown, and numerically exact -- it changes no "
+             "results and no slice cache keys. Recommended for --cl-method sd_lora, "
+             "which additionally holds every previous task's frozen block.",
+    )
+    parser.add_argument(
+        "--slice-probe-batch-size", type=int, default=None,
+        help="Batch size for the init's gradient probe. Defaults to the training batch "
+             "size (current behavior). Pin it when lowering the training batch for "
+             "memory, so the init gradients and slice cache entries stay unchanged.",
+    )
     parser.add_argument("--slice-grad-project", action="store_true", help="Project current-task gradients against retain gradients for slice init.")
     parser.add_argument(
         "--slice-grad-projection-mode",
@@ -828,6 +863,10 @@ def main() -> None:
         rank=args.rank,
         lora_alpha=args.lora_alpha,
         warmup_ratio=args.warmup_ratio,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        gradient_checkpointing=args.gradient_checkpointing,
+        slice_probe_batch_size=args.slice_probe_batch_size,
         slice_enabled=args.slice_init,
         slice_cache_dir=args.slice_cache_dir,
         slice_max_steps=args.slice_max_steps,
