@@ -273,6 +273,8 @@ def train_on_task(
     per_device_train_batch_size: int = 16,
     per_device_eval_batch_size: int = 8,
     gradient_accumulation_steps: int = 2,
+    gradient_checkpointing: bool = False,
+    slice_probe_batch_size: int | None = None,
     logging_steps: int = 50,
     save_steps: int = 500,
     eval_steps: int = 500,
@@ -343,17 +345,43 @@ def train_on_task(
     active_adapter = "default"
     lora_model.print_trainable_parameters()
 
+    # Let a no-merge CL method install its accumulated previous-task state BEFORE
+    # the init runs, so the init's gradient probe measures at the model's real
+    # operating point (W0 + sum_i s_i D_i) instead of at a pristine W0. Critical
+    # for the retain gradient: at pristine W0 the model hasn't learned the prior
+    # tasks, so g_r would describe "learn them" rather than "where retention
+    # degrades", and the conflict projection would gate on the wrong signal.
+    if cl_method is not None:
+        cl_method.before_init(
+            lora_model,
+            stage_idx=int(stage_idx),
+            retain_tasks=retain_tasks,
+        )
+
     slice_projection_summary: dict | None = None
     if slice_enabled:
         model_id = (
             getattr(getattr(model, "config", None), "_name_or_path", None)
             or getattr(model, "name_or_path", None)
         )
+        _cache_ctx = slice_cache_context or (str(model_id) if model_id else None)
+        if sd_lora_mode:
+            # The probe now runs against W0 + sum_i s_i D_i, so its gradients are
+            # not interchangeable with a merge-pipeline entry for the same stage.
+            _cache_ctx = f"{_cache_ctx}|sdlora_accum"
         slice_config = SliceInitConfig(
             cache_dir=slice_cache_dir,
-            cache_context=slice_cache_context or (str(model_id) if model_id else None),
+            cache_context=_cache_ctx,
             max_steps=slice_max_steps,
-            per_device_batch_size=per_device_train_batch_size,
+            # Kept separate from the training batch size on purpose: the probe
+            # batch feeds the init's gradient estimate AND the slice cache key, so
+            # lowering the training batch for memory must not silently change the
+            # init or invalidate cached inits.
+            per_device_batch_size=(
+                slice_probe_batch_size
+                if slice_probe_batch_size is not None
+                else per_device_train_batch_size
+            ),
             seed=seed,
             retain_scale=slice_retain_scale,
             grad_project=slice_grad_project,
@@ -448,11 +476,20 @@ def train_on_task(
         eval_strategy="steps",
         eval_steps=eval_steps,
         bf16=use_bf16,
+        gradient_checkpointing=bool(gradient_checkpointing),
+        gradient_checkpointing_kwargs={"use_reentrant": False} if gradient_checkpointing else None,
         dataloader_num_workers=2,
         report_to="none",
         remove_unused_columns=True,
         seed=seed,
     )
+
+    if gradient_checkpointing:
+        # With a frozen base, a checkpointed segment can otherwise receive no
+        # grad-requiring input and silently produce no gradients.
+        enable_inputs = getattr(lora_model, "enable_input_require_grads", None)
+        if callable(enable_inputs):
+            enable_inputs()
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
@@ -499,11 +536,14 @@ def train_on_task(
 
     if sd_lora_mode:
         # Persist the cumulative SD-LoRA state (frozen blocks + scalars) next to
-        # the adapter checkpoints so standalone eval can bake W0 + sum s_i D_i.
-        if save_adapter:
-            cl_method.save(str(output_path / "adapter"))
+        # the adapter checkpoint so standalone eval can bake W0 + sum s_i D_i.
+        # Written to ONE location only: the state is cumulative and grows with the
+        # stage index, so duplicating it into the train output dir doubles disk for
+        # no benefit (eval_manifest points at the checkpoint adapter).
         if adapter_checkpoint_path:
             cl_method.save(str(Path(adapter_checkpoint_path)))
+        elif save_adapter:
+            cl_method.save(str(output_path / "adapter"))
         # Keep the override live and unmerged: the trained model already equals
         # W0 + sum s_i D_i for in-run eval, and unload() restores a pristine base
         # for the next stage.
