@@ -105,6 +105,55 @@ def _tokenize_dataset(dataset, tokenizer, max_length: int):
     )
 
 
+def _setup_peft_for_sapt(model, lora_cfg, adapter_name: str):
+    """Prepare a PEFT model for SAPT stage training (parallel named adapters).
+
+    If the input model is a fresh base, wrap it with a named adapter
+    (`adapter_name`). If it is already a PEFT model from a previous SAPT
+    stage, append a new named adapter and make only it trainable -- the prior
+    experts stay loaded and frozen so the router can mix them at eval, and so
+    the current task trains in isolation on top of the pristine base.
+    """
+    from peft import PeftModel, get_peft_model
+
+    if isinstance(model, PeftModel):
+        # Already wrapped: add the new adapter and activate only it.
+        try:
+            model.add_adapter(adapter_name, lora_cfg)
+        except ValueError:
+            # adapter_name already present (e.g. on resume) -- recover by
+            # selecting it; weights will be re-initialized by slice/init below.
+            pass
+        # Freeze all loaded adapters' params, then set the new one trainable.
+        from peft.tuners.lora import Linear as LoraLinear
+
+        for _, mod in model.named_modules():
+            if not isinstance(mod, LoraLinear):
+                continue
+            for name in list(mod.lora_A.keys()):
+                mod.lora_A[name].weight.requires_grad_(name == adapter_name)
+            for name in list(mod.lora_B.keys()):
+                mod.lora_B[name].weight.requires_grad_(name == adapter_name)
+        model.set_adapter(adapter_name)
+        return model, adapter_name
+
+    # Fresh base: build a PEFT model with the adapter named explicitly.
+    try:
+        wrapped = get_peft_model(model, lora_cfg, adapter_name=adapter_name)
+    except TypeError:
+        # Older PEFT versions: get_peft_model has no adapter_name kwarg.
+        # Create with default name then rename via add+delete.
+        wrapped = get_peft_model(model, lora_cfg)
+        if adapter_name != "default":
+            wrapped.add_adapter(adapter_name, lora_cfg)
+            wrapped.set_adapter(adapter_name)
+            try:
+                wrapped.delete_adapter("default")
+            except Exception:
+                pass
+    return wrapped, adapter_name
+
+
 class _CLAuxLossTrainer(Trainer):
     """Trainer that adds a CL-method auxiliary loss term on every step.
 
@@ -159,6 +208,55 @@ def _apply_init_absorption(peft_model, init_correction: dict) -> None:
         base_weight.data.copy_(
             (base_weight.data.to(torch.float32) - offset).to(orig_dtype)
         )
+
+
+def load_sapt_model(
+    base_model_path: str,
+    adapter_paths: List[str],
+    router_path: str,
+    *,
+    hf_token: str | None = HF_TOKEN,
+    torch_dtype: torch.dtype = torch.bfloat16,
+    device_map: str = "auto",
+):
+    """Load base + every stage adapter as parallel named adapters and wrap in SAPT.
+
+    Returns a `SAPTWrapper` ready for `evaluate_all` (drop-in for an
+    `nn.Module` exposing `forward`/`generate`). Adapter naming convention
+    is "task_NN" for the i-th path (1-based) -- matching what
+    `SAPTMethod.adapter_name_for_stage` produces during training. No merging
+    and no absorption replay: SAPT keeps the base pristine and every expert live.
+    """
+    from peft import PeftModel
+
+    try:
+        from .sapt import SAPTRouter, SAPTWrapper
+    except ImportError:
+        from sapt import SAPTRouter, SAPTWrapper  # type: ignore[no-redef]
+
+    base = load_base_model(
+        base_model_path, hf_token=hf_token, torch_dtype=torch_dtype, device_map=device_map
+    )
+    if not adapter_paths:
+        raise ValueError("load_sapt_model requires at least one adapter path.")
+
+    adapter_names: List[str] = []
+    peft_model = None
+    for i, ap in enumerate(adapter_paths):
+        name = f"task_{i + 1:02d}"
+        adapter_names.append(name)
+        # PEFT saves named adapters to {path}/{adapter_name}/ when using
+        # selected_adapters. Resolve that subdirectory when present.
+        named_subdir = Path(ap) / name
+        if named_subdir.is_dir() and (named_subdir / "adapter_config.json").exists():
+            ap = str(named_subdir)
+        if peft_model is None:
+            peft_model = PeftModel.from_pretrained(base, ap, adapter_name=name)
+        else:
+            peft_model.load_adapter(ap, adapter_name=name)
+
+    router = SAPTRouter.load_from_path(router_path)
+    return SAPTWrapper(peft_model, router, adapter_names)
 
 
 def load_model_with_adapters(
@@ -320,12 +418,23 @@ def train_on_task(
     """
     set_global_seed(seed)
 
-    # SD-LoRA (and any no-merge CL method) keeps the model wrapped across stages
-    # so previous-task directions stay live. Unwrap the incoming PeftModel back to
-    # the pristine base before starting a fresh adapter for this task.
-    sd_lora_mode = bool(getattr(cl_method, "requires_no_merge", False))
+    # No-merge CL methods (SD-LoRA, SAPT) keep previous-task knowledge live across
+    # stages instead of merging it into the base. Two sub-styles, distinguished by
+    # `keeps_parallel_adapters`:
+    #   * forward-override (SD-LoRA): unload the incoming PeftModel back to a
+    #     pristine base; the priors are re-installed as frozen blocks in a forward
+    #     override, so a fresh "default" adapter is trained on top.
+    #   * parallel-adapter (SAPT): keep the incoming PeftModel wrapped and append
+    #     this task as a new *named* adapter beside the frozen priors -- never
+    #     unload, never merge, so every task's expert stays live for routing.
+    no_merge_mode = bool(getattr(cl_method, "requires_no_merge", False))
     force_skip_absorption = bool(getattr(cl_method, "requires_skip_absorption", False))
-    if isinstance(model, PeftModel):
+    parallel_adapter_mode = bool(getattr(cl_method, "keeps_parallel_adapters", False))
+    # SD-LoRA-style no-merge that installs accumulated state into the forward and
+    # bakes cumulative state for eval; carved out from the parallel-adapter path.
+    forward_override_mode = no_merge_mode and not parallel_adapter_mode
+
+    if isinstance(model, PeftModel) and not parallel_adapter_mode:
         model = model.unload()
         # unload() leaves a lingering `peft_config` attribute on the base model;
         # drop it so the fresh get_peft_model() below doesn't warn about (or stack)
@@ -341,8 +450,15 @@ def train_on_task(
     eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
 
     lora_cfg = build_lora_config(r=rank, lora_alpha=lora_alpha)
-    lora_model = get_peft_model(model, lora_cfg)
-    active_adapter = "default"
+    if parallel_adapter_mode:
+        # SAPT: append `task_NN` beside any frozen priors and train only it. The
+        # SLICE init below writes into this adapter (skip_absorption keeps the
+        # base pristine); the priors stay loaded for the router to mix at eval.
+        active_adapter = cl_method.adapter_name_for_stage(int(stage_idx))
+        lora_model, active_adapter = _setup_peft_for_sapt(model, lora_cfg, active_adapter)
+    else:
+        lora_model = get_peft_model(model, lora_cfg)
+        active_adapter = "default"
     lora_model.print_trainable_parameters()
 
     # Let a no-merge CL method install its accumulated previous-task state BEFORE
@@ -365,9 +481,11 @@ def train_on_task(
             or getattr(model, "name_or_path", None)
         )
         _cache_ctx = slice_cache_context or (str(model_id) if model_id else None)
-        if sd_lora_mode:
-            # The probe now runs against W0 + sum_i s_i D_i, so its gradients are
+        if forward_override_mode:
+            # SD-LoRA's probe runs against W0 + sum_i s_i D_i, so its gradients are
             # not interchangeable with a merge-pipeline entry for the same stage.
+            # SAPT trains each expert in isolation, so its probe is base-only and
+            # its init is cache-compatible with a plain slice init (no suffix).
             _cache_ctx = f"{_cache_ctx}|sdlora_accum"
         slice_config = SliceInitConfig(
             cache_dir=slice_cache_dir,
@@ -441,9 +559,11 @@ def train_on_task(
     else:
         lora_init_correction = {}
 
-    if sd_lora_mode:
-        # SD-LoRA stores each task's init inside its frozen block and never
-        # absorbs into the base, so there is no absorption to replay at eval time.
+    if no_merge_mode:
+        # No-merge methods run the SLICE init with skip_absorption=True, so the
+        # base is never mutated and there is nothing to replay at eval time.
+        # (SD-LoRA folds each task's init into its frozen block; SAPT keeps the
+        # init live inside the per-task adapter.)
         lora_init_correction = {}
 
     # CL-method pre-training hook (fires AFTER init_correction capture so
@@ -522,6 +642,12 @@ def train_on_task(
     )
 
     save_kwargs: Dict[str, Any] = {}
+    if parallel_adapter_mode:
+        # SAPT keeps every task's adapter live; persist ONLY the just-trained one
+        # so the directory round-trips with model.load_adapter(path, adapter_name=..).
+        # Without this, save_pretrained would write all live adapters and the
+        # reload path (load_sapt_model / resume) would double-count the priors.
+        save_kwargs["selected_adapters"] = [active_adapter]
     if save_adapter:
         lora_model.save_pretrained(str(output_path / "adapter"), **save_kwargs)
         if lora_init_correction:
@@ -534,8 +660,8 @@ def train_on_task(
         if lora_init_correction:
             torch.save(lora_init_correction, adapter_cp / "init_correction.pt")
 
-    if sd_lora_mode:
-        # Persist the cumulative SD-LoRA state (frozen blocks + scalars) next to
+    if forward_override_mode:
+        # SD-LoRA: persist the cumulative state (frozen blocks + scalars) next to
         # the adapter checkpoint so standalone eval can bake W0 + sum s_i D_i.
         # Written to ONE location only: the state is cumulative and grows with the
         # stage index, so duplicating it into the train output dir doubles disk for
@@ -544,9 +670,13 @@ def train_on_task(
             cl_method.save(str(Path(adapter_checkpoint_path)))
         elif save_adapter:
             cl_method.save(str(output_path / "adapter"))
-        # Keep the override live and unmerged: the trained model already equals
-        # W0 + sum s_i D_i for in-run eval, and unload() restores a pristine base
-        # for the next stage.
+
+    if no_merge_mode:
+        # Keep the model unmerged. SD-LoRA's forward already equals W0 + sum s_i D_i
+        # for in-run eval and unload() restores a pristine base next stage; SAPT
+        # keeps every task's named adapter live so the router can mix them. SAPT's
+        # own state (router, seed prompts) is persisted by the orchestrator via
+        # cl_method.save() after ARM, so it is intentionally not written here.
         post_stage_model = lora_model
     else:
         merge_fn = getattr(lora_model, "merge_and_unload", None)
