@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, Type
 
 from .base import CLMethod
+from .inflora import InfLoRAMethod
 from .o_lora import OLoRAMethod
 from .sd_lora import SDLoRAMethod
 from .vanilla import VanillaCLMethod
@@ -17,6 +18,7 @@ from .vanilla import VanillaCLMethod
 REGISTRY: Dict[str, Type[CLMethod]] = {
     "vanilla": VanillaCLMethod,
     "o_lora": OLoRAMethod,
+    "inflora": InfLoRAMethod,
     "sd_lora": SDLoRAMethod,
 }
 
@@ -48,6 +50,7 @@ def _accepted_kwargs(cls: Type[CLMethod]) -> set:
 
 __all__ = [
     "CLMethod",
+    "InfLoRAMethod",
     "OLoRAMethod",
     "REGISTRY",
     "SDLoRAMethod",

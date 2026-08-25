@@ -423,7 +423,7 @@ def run_sequence(
             )
 
     # Build the CL method object once per run. Persistent state (O-LoRA A
-    # snapshots) lives under <run>/cl_state/ and is reloaded on resume so
+    # snapshots, InfLoRA covariance) lives under <run>/cl_state/ and is reloaded on resume so
     # the per-stage history carries across runs.
     cl_state_dir = run_output_dir / "cl_state"
     cl_state_dir.mkdir(parents=True, exist_ok=True)
@@ -821,11 +821,37 @@ def main() -> None:
         help="Continual-learning training method (composes with any LoRA init). "
              "'vanilla' (default) is the existing per-stage train+merge pipeline. "
              "'o_lora' adds an orthogonality regularizer between current and prior "
-             "task A matrices. 'sd_lora' keeps every task's frozen net-update "
+             "task A matrices. 'inflora' projects the new task's A onto the null "
+             "space of the accumulated past-task input-feature covariance. "
+             "'sd_lora' keeps every task's frozen net-update "
              "direction live (no merge) with trainable per-task magnitude scalars "
              "(pair with --slice-init for SD-LoRA + SLICE).")
     parser.add_argument("--cl-o-lora-lambda", type=float, default=0.5,
         help="O-LoRA orthogonality regularizer weight. Used only when --cl-method=o_lora.")
+    parser.add_argument("--cl-inflora-nullspace-rank", type=int, default=256,
+        help="CAP on the number of past-task input directions InfLoRA projects A out of "
+             "(also the rank of the covariance sketch). NOT the LoRA rank -- see --rank. "
+             "The per-module k is picked by --cl-inflora-nullspace-energy and additionally "
+             "clamped to d_in - r so A keeps at least r free input directions. "
+             "Default 256 = 4x the rank-64 adapters. Used only when --cl-method=inflora.")
+    parser.add_argument("--cl-inflora-nullspace-energy", type=float, default=0.99,
+        help="Fraction of the accumulated past-input covariance trace the projected-out "
+             "subspace must cover, per module (Adam-NSCL / InfLoRA style spectrum rule). "
+             "Set outside (0, 1) to use a fixed k = --cl-inflora-nullspace-rank everywhere.")
+    parser.add_argument("--cl-inflora-max-cov-batches", type=int, default=32,
+        help="Forward batches per stage used to estimate the input covariance. "
+             "Used only when --cl-method=inflora.")
+    parser.add_argument("--cl-inflora-cov-batch-size", type=int, default=8,
+        help="Batch size used during InfLoRA covariance estimation forward passes.")
+    parser.add_argument("--cl-inflora-cov-store", choices=["sketch", "full"], default="sketch",
+        help="How InfLoRA stores the accumulated covariance. 'sketch' (default) keeps a "
+             "row factor F of rank --cl-inflora-nullspace-rank with C ~= F^T F (980MB for "
+             "Qwen3-4B at cap 256); 'full' materializes the exact dense (d_in, d_in) "
+             "covariance per module, which is 20.8GB of RAM and per-stage disk for the "
+             "same model.")
+    parser.add_argument("--cl-inflora-cov-sample-rows", type=int, default=32,
+        help="Activation rows sampled per covariance batch per module when "
+             "--cl-inflora-cov-store=sketch. Ignored for 'full'.")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
         help="Keep all intermediate stage checkpoints. By default only the latest is kept.")
     parser.add_argument("--save-checkpoints", action="store_true",
@@ -948,6 +974,12 @@ def main() -> None:
         cl_method_name=args.cl_method,
         cl_method_kwargs={
             "lambda_orth": args.cl_o_lora_lambda,
+            "nullspace_rank": args.cl_inflora_nullspace_rank,
+            "nullspace_energy": args.cl_inflora_nullspace_energy,
+            "max_cov_batches": args.cl_inflora_max_cov_batches,
+            "cov_batch_size": args.cl_inflora_cov_batch_size,
+            "cov_store": args.cl_inflora_cov_store,
+            "cov_sample_rows": args.cl_inflora_cov_sample_rows,
             "max_seq_length": args.max_seq_length,
             "seed": args.seed,
         },
