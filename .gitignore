@@ -9,8 +9,7 @@ __pycache__/
 datasets_cache/
 plots/
 results/
-slice_cache_diag/
-slice_cache/
+slice_cache*/
 imported_results/
 imported_results_pending/
 figs/
@@ -186,3 +185,11 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+### Project ###
+# Per-experiment launchers, exploratory analysis and scratch notes. These are
+# personal to whoever ran the experiment, not part of the released pipeline;
+# scripts/ itself still tracks the reusable entry points.
+scripts/local/
+notebooks/
+notes/
