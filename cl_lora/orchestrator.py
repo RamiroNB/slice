@@ -212,6 +212,7 @@ def run_sequence(
     eval_size: int,
     task_eval_samples: int,
     task_eval_max_new_tokens: int,
+    split_seed: int | None,
     quick_eval: bool,
     save_final_model: bool,
     resume: bool,
@@ -275,6 +276,7 @@ def run_sequence(
         "eval_size": int(eval_size),
         "task_eval_samples": int(task_eval_samples),
         "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
+        "split_seed": split_seed,
         "rank": int(rank),
         "lora_alpha": int(lora_alpha),
         "per_device_train_batch_size": int(per_device_train_batch_size),
@@ -459,6 +461,7 @@ def run_sequence(
             output_dir=str(stage_train_dir),
             eval_size=eval_size,
             seed=seed,
+            split_seed=split_seed,
             retain_tasks=retain_tasks,
             rank=rank,
             lora_alpha=lora_alpha,
@@ -551,6 +554,9 @@ def run_sequence(
                 # this run was trained, whatever --max-seq-length was used.
                 "max_seq_length": int(max_seq_length),
                 "seed": int(seed),
+                # The eval set is only held out if a replay uses the same value
+                # this stage trained under; eval_standalone reads it from here.
+                "split_seed": split_seed,
                 "train_output_dir": str(stage_train_dir),
                 "cl_method": cl_method.name,
             },
@@ -581,6 +587,7 @@ def run_sequence(
                 quick_eval=quick_eval,
                 skip_general_eval=skip_general,
                 seed=seed,
+                split_seed=split_seed,
             )
             stage_record = {
                 "stage": idx,
@@ -674,6 +681,19 @@ def main() -> None:
     parser.add_argument("--eval-size", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42, help="Global RNG seed for reproducibility.")
     parser.add_argument("--task-eval-samples", type=int, default=64)
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=None,
+        help=(
+            "Pin the train/eval partition to this seed instead of --seed, so every "
+            "run scores the identical held-out questions. Removes question-sampling "
+            "noise from between-seed and between-method contrasts and makes "
+            "question-level paired inference possible. Governs training too: the "
+            "model trains on the complement, so the eval questions stay genuinely "
+            "held out. Leave unset to keep the legacy seed-coupled split."
+        ),
+    )
     parser.add_argument("--task-eval-max-new-tokens", type=int, default=64)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--resume", action="store_true")
@@ -883,6 +903,7 @@ def main() -> None:
         eval_size=args.eval_size,
         task_eval_samples=args.task_eval_samples,
         task_eval_max_new_tokens=args.task_eval_max_new_tokens,
+        split_seed=args.split_seed,
         quick_eval=args.quick_eval,
         save_final_model=args.save_final_model,
         resume=args.resume,

@@ -319,6 +319,10 @@ def train_on_task(
     completion_only_loss: bool = True,
     eval_size: int = 200,
     seed: int = 42,
+    # Pins the train/eval partition independently of `seed`. Training must use
+    # the same value the eval will use, otherwise the held-out questions end up
+    # in this task's training data.
+    split_seed: int | None = None,
     use_bf16: bool = True,
     save_adapter: bool = True,
     save_intermediate_checkpoints: bool = False,
@@ -374,7 +378,9 @@ def train_on_task(
             except AttributeError:
                 pass
 
-    train_dataset, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
+    train_dataset, eval_dataset = load_training_dataset(
+        task=task, eval_size=eval_size, seed=seed, split_seed=split_seed,
+    )
     train_dataset = _tokenize_dataset(
         train_dataset, tokenizer=tokenizer, max_length=max_seq_length,
         completion_only=completion_only_loss, log_context="train",

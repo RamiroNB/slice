@@ -352,6 +352,24 @@ def _model_device(model) -> torch.device:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _warn_if_samples_exceed_split(task_eval_samples: int, eval_size: int) -> None:
+    """The held-out split is the hard ceiling on how many questions can be scored.
+
+    Asking for more silently evaluates on however many the split happens to hold,
+    which is how an eval quietly stays at n=64 after someone raises the sample
+    count. Enlarging the split instead requires re-training, since it redraws the
+    train/eval boundary.
+    """
+    if task_eval_samples and eval_size and task_eval_samples > eval_size:
+        warnings.warn(
+            f"task_eval_samples={task_eval_samples} exceeds eval_size={eval_size}; "
+            f"only {eval_size} questions per task exist in the held-out split, so the "
+            "eval will silently use that many. Raise eval_size to score more — but note "
+            "that redraws the train/eval partition and therefore requires re-training.",
+            stacklevel=3,
+        )
+
+
 def _tokenize_dataset_for_perplexity(dataset, tokenizer, max_length: int,
                                      *, completion_only: bool = True):
     # Completion-only by default so the reported perplexity is over the tokens
@@ -377,8 +395,11 @@ def _evaluate_task_perplexity(
     per_device_eval_batch_size: int,
     task_eval_samples: int,
     seed: int,
+    split_seed: int | None = None,
 ) -> Dict[str, Any]:
-    _, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
+    _, eval_dataset = load_training_dataset(
+        task=task, eval_size=eval_size, seed=seed, split_seed=split_seed,
+    )
     if task_eval_samples and len(eval_dataset) > task_eval_samples:
         eval_dataset = eval_dataset.select(range(task_eval_samples))
     eval_dataset = _tokenize_dataset_for_perplexity(
@@ -621,12 +642,16 @@ def evaluate_seen_tasks(
     max_new_tokens: int = 64,
     task_eval_samples: int = 64,
     seed: int = 42,
+    split_seed: int | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
+    _warn_if_samples_exceed_split(task_eval_samples, eval_size)
 
     for task in seen_tasks:
         task_name = getattr(task, "name", str(task))
-        _, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
+        _, eval_dataset = load_training_dataset(
+            task=task, eval_size=eval_size, seed=seed, split_seed=split_seed,
+        )
         if task_eval_samples and len(eval_dataset) > task_eval_samples:
             eval_dataset = eval_dataset.select(range(task_eval_samples))
 
@@ -658,8 +683,10 @@ def evaluate_seen_tasks_perplexity(
     per_device_eval_batch_size: int = 8,
     task_eval_samples: int = 64,
     seed: int = 42,
+    split_seed: int | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
+    _warn_if_samples_exceed_split(task_eval_samples, eval_size)
 
     for task in seen_tasks:
         task_name = getattr(task, "name", str(task))
@@ -672,6 +699,7 @@ def evaluate_seen_tasks_perplexity(
             per_device_eval_batch_size=per_device_eval_batch_size,
             task_eval_samples=task_eval_samples,
             seed=seed,
+            split_seed=split_seed,
         )
 
         if torch.cuda.is_available():
@@ -697,6 +725,10 @@ def evaluate_all(
     quick_eval: bool = False,
     skip_general_eval: bool = False,
     seed: int = 42,
+    # Pins which questions form the held-out set, independently of the training
+    # seed. Must match the value the checkpoint was trained under, or the eval
+    # set will contain examples the model was fine-tuned on.
+    split_seed: int | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
 
@@ -720,6 +752,7 @@ def evaluate_all(
             max_seq_length=max_input_length,
             task_eval_samples=task_eval_samples,
             seed=seed,
+            split_seed=split_seed,
         )
     else:
         seen = evaluate_seen_tasks(
@@ -732,6 +765,7 @@ def evaluate_all(
             max_new_tokens=task_eval_max_new_tokens,
             task_eval_samples=task_eval_samples,
             seed=seed,
+            split_seed=split_seed,
         )
 
     # -- general evaluation (original model for lm-eval HFLM compat) --

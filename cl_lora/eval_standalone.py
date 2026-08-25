@@ -85,6 +85,7 @@ def run_eval_from_manifest(
     task_eval_max_new_tokens: Optional[int] = None,
     max_input_length: Optional[int] = None,
     seed: Optional[int] = None,
+    split_seed: Optional[int] = None,
     general_eval_batch_size: int = 8,
 ) -> Dict[str, Any]:
     """Run evaluation for one stage, writing stage_record.json to stage_dir.
@@ -121,6 +122,13 @@ def run_eval_from_manifest(
     # same way. Pre-fix manifests have no such key and fall back to the default.
     resolved_max_input: int = int(_get("max_seq_length", max_input_length, 1024))
     resolved_seed: int = int(_get("seed", seed, 42))
+    # The partition this checkpoint was trained under. Overriding it re-draws the
+    # train/eval boundary, which would put examples the model was fine-tuned on
+    # into the eval set — so it defaults to whatever the manifest recorded, and
+    # pre-fix manifests (no key) correctly fall back to the seed-coupled split.
+    resolved_split_seed: Optional[int] = _get("split_seed", split_seed, None)
+    if resolved_split_seed is not None:
+        resolved_split_seed = int(resolved_split_seed)
     stage: int = int(manifest.get("stage", 0))
     trained_task: str = manifest.get("trained_task", "")
 
@@ -181,6 +189,27 @@ def run_eval_from_manifest(
         tokenizer = build_tokenizer(model_name=abs_model_path, hf_token=HF_TOKEN)
         model = load_base_model(model_name=abs_model_path, hf_token=HF_TOKEN)
 
+    # Re-scoring is only valid on the partition the checkpoint was trained under.
+    # eval_size and split_seed both move that boundary, so pulling either away
+    # from the manifest scores the model on its own training data.
+    manifest_eval_size = manifest.get("eval_size")
+    if manifest_eval_size is not None and int(manifest_eval_size) != resolved_eval_size:
+        print(
+            f"WARNING: eval_size overridden ({manifest_eval_size} -> {resolved_eval_size}). "
+            "This redraws the train/eval split, so the eval set will contain examples this "
+            "checkpoint was trained on. Scores will be inflated and are not comparable."
+        )
+    if manifest.get("split_seed") != resolved_split_seed:
+        print(
+            f"WARNING: split_seed overridden ({manifest.get('split_seed')} -> {resolved_split_seed}). "
+            "Same contamination risk as above."
+        )
+    if resolved_samples > resolved_eval_size:
+        print(
+            f"NOTE: task_eval_samples={resolved_samples} exceeds the held-out split "
+            f"({resolved_eval_size}); the eval will use {resolved_eval_size} questions per task."
+        )
+
     print(f"Resolving {len(resolved_eval_seen_names)} eval tasks from sequence '{resolved_sequence}'")
     eval_seen = _resolve_tasks(resolved_sequence, resolved_eval_seen_names)
 
@@ -201,6 +230,7 @@ def run_eval_from_manifest(
         quick_eval=resolved_quick,
         skip_general_eval=resolved_skip_general,
         seed=resolved_seed,
+        split_seed=resolved_split_seed,
     )
 
     train_report: Dict[str, Any] = {}
@@ -224,7 +254,13 @@ def run_eval_from_manifest(
 
 
 def recompute_run_summary(run_dir: Path) -> None:
-    """Rebuild results_matrix.json and metrics.json from all stage_record.json files."""
+    """Rebuild the run-level files from all stage_record.json files.
+
+    run_summary.json is refreshed alongside results_matrix.json and metrics.json:
+    it embeds a copy of every stage_record, so leaving it behind after a re-score
+    strands a second, stale set of task scores in the run directory for analysis
+    code to pick up by mistake.
+    """
     stages_dir = run_dir / "stages"
     if not stages_dir.exists():
         print(f"No stages/ directory found in {run_dir}")
@@ -247,7 +283,17 @@ def recompute_run_summary(run_dir: Path) -> None:
     summary = compute_cl_metrics(stage_records=stage_records, task_order=task_order)
     _write_json(run_dir / "results_matrix.json", summary["results_matrix"])
     _write_json(run_dir / "metrics.json", summary["metrics"])
-    print(f"Updated results_matrix.json and metrics.json in {run_dir}")
+
+    summary_path = run_dir / "run_summary.json"
+    if summary_path.exists():
+        payload = _read_json(summary_path)
+        payload["stage_records"] = stage_records
+        payload["summary"] = summary
+        payload.setdefault("task_order", task_order)
+        _write_json(summary_path, payload)
+        print(f"Updated results_matrix.json, metrics.json and run_summary.json in {run_dir}")
+    else:
+        print(f"Updated results_matrix.json and metrics.json in {run_dir}")
     print(json.dumps(summary["metrics"], indent=2))
 
 
@@ -293,6 +339,9 @@ def main() -> None:
     stage_p.add_argument("--max-input-length", type=int, default=None,
                        help="Override the prompt budget; defaults to the run's trained max_seq_length.")
     stage_p.add_argument("--seed", type=int, default=None)
+    stage_p.add_argument("--split-seed", type=int, default=None,
+                       help="Override the train/eval partition seed. Defaults to the manifest "
+                            "value; changing it contaminates the eval set with training data.")
     stage_p.add_argument("--general-eval-batch-size", type=int, default=8)
     stage_p.add_argument("--log-level", default="INFO")
 
@@ -319,6 +368,9 @@ def main() -> None:
     run_p.add_argument("--max-input-length", type=int, default=None,
                        help="Override the prompt budget; defaults to the run's trained max_seq_length.")
     run_p.add_argument("--seed", type=int, default=None)
+    run_p.add_argument("--split-seed", type=int, default=None,
+                     help="Override the train/eval partition seed. Defaults to the manifest "
+                          "value; changing it contaminates the eval set with training data.")
     run_p.add_argument("--general-eval-batch-size", type=int, default=8)
     run_p.add_argument("--log-level", default="INFO")
 
@@ -360,6 +412,7 @@ def main() -> None:
             task_eval_max_new_tokens=args.task_eval_max_new_tokens,
             max_input_length=args.max_input_length,
             seed=args.seed,
+            split_seed=args.split_seed,
             general_eval_batch_size=args.general_eval_batch_size,
         )
 
@@ -423,6 +476,7 @@ def main() -> None:
                 task_eval_max_new_tokens=args.task_eval_max_new_tokens,
                 max_input_length=args.max_input_length,
                 seed=args.seed,
+                split_seed=args.split_seed,
                 general_eval_batch_size=args.general_eval_batch_size,
             )
 
