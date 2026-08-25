@@ -12,13 +12,13 @@ from typing import Any, Dict, Iterable, List
 
 import torch
 from torch.utils.data import DataLoader
-from transformers import DataCollatorForLanguageModeling
-
 try:
+    from .data import build_collator, encode_prompts_for_generation, tokenize_dataset
     from .load_dataset import load_training_dataset
     from .repro import set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS
 except ImportError:
+    from data import build_collator, encode_prompts_for_generation, tokenize_dataset
     from load_dataset import load_training_dataset
     from repro import set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS
@@ -352,10 +352,17 @@ def _model_device(model) -> torch.device:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _tokenize_dataset_for_perplexity(dataset, tokenizer, max_length: int):
-    return dataset.map(
-        lambda ex: tokenizer(ex["text"], truncation=True, max_length=max_length),
-        remove_columns=dataset.column_names,
+def _tokenize_dataset_for_perplexity(dataset, tokenizer, max_length: int,
+                                     *, completion_only: bool = True):
+    # Completion-only by default so the reported perplexity is over the tokens
+    # the task is scored on, not over the instruction text that dominates the
+    # sequence (which would make perplexity mostly a measure of the prompt).
+    return tokenize_dataset(
+        dataset,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        completion_only=completion_only,
+        log_context="perplexity",
     )
 
 
@@ -380,7 +387,7 @@ def _evaluate_task_perplexity(
         max_length=max_seq_length,
     )
 
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    collator = build_collator(tokenizer)
     dataloader = DataLoader(
         eval_dataset,
         batch_size=per_device_eval_batch_size,
@@ -447,12 +454,8 @@ def _evaluate_task_with_generation(
             batch_prompts = prompts[start : start + batch_size]
             batch_targets = targets[start : start + batch_size]
 
-            encoded = tokenizer(
-                batch_prompts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=max_input_length,
+            encoded = encode_prompts_for_generation(
+                tokenizer, batch_prompts, max_length=max_input_length,
             )
             encoded = {k: v.to(device) for k, v in encoded.items()}
 
@@ -611,7 +614,9 @@ def evaluate_seen_tasks(
     seen_tasks,
     output_dir: str,
     eval_size: int = 200,
-    max_input_length: int = 512,
+    # Matches train max_seq_length: eval prompts now go through the same
+    # left-truncation rule, so the assistant header survives on long inputs.
+    max_input_length: int = 1024,
     per_device_eval_batch_size: int = 8,
     max_new_tokens: int = 64,
     task_eval_samples: int = 64,
@@ -649,7 +654,7 @@ def evaluate_seen_tasks_perplexity(
     tokenizer,
     seen_tasks,
     eval_size: int = 200,
-    max_seq_length: int = 512,
+    max_seq_length: int = 1024,
     per_device_eval_batch_size: int = 8,
     task_eval_samples: int = 64,
     seed: int = 42,
@@ -685,6 +690,10 @@ def evaluate_all(
     eval_size: int = 200,
     task_eval_samples: int = 64,
     task_eval_max_new_tokens: int = 64,
+    # Prompt/sequence budget for seen-task eval. Should track the run's training
+    # max_seq_length so eval prompts are truncated the same way training was;
+    # the orchestrator records it in eval_manifest.json for standalone passes.
+    max_input_length: int = 1024,
     quick_eval: bool = False,
     skip_general_eval: bool = False,
     seed: int = 42,
@@ -708,6 +717,7 @@ def evaluate_all(
             tokenizer=tokenizer,
             seen_tasks=seen_tasks,
             eval_size=eval_size,
+            max_seq_length=max_input_length,
             task_eval_samples=task_eval_samples,
             seed=seed,
         )
@@ -718,6 +728,7 @@ def evaluate_all(
             seen_tasks=seen_tasks,
             output_dir=output_dir,
             eval_size=eval_size,
+            max_input_length=max_input_length,
             max_new_tokens=task_eval_max_new_tokens,
             task_eval_samples=task_eval_samples,
             seed=seed,

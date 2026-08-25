@@ -16,7 +16,6 @@ from peft import get_peft_model, PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
 )
@@ -24,12 +23,14 @@ import logging
 
 try:
     from .cl_methods import CLMethod, VanillaCLMethod
+    from .data import build_collator, tokenize_dataset
     from .load_dataset import configure_prompt_tokenizer, load_training_dataset
     from .lora_config import build_lora_config
     from .repro import set_global_seed
     from .slice import SliceInitConfig, initialize_lora_with_slice
 except ImportError:
     from cl_methods import CLMethod, VanillaCLMethod  # type: ignore[no-redef]
+    from data import build_collator, tokenize_dataset  # type: ignore[no-redef]
     from load_dataset import configure_prompt_tokenizer, load_training_dataset  # type: ignore[no-redef]
     from lora_config import build_lora_config
     from repro import set_global_seed
@@ -60,11 +61,43 @@ MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 HF_TOKEN = os.getenv("HUGGING_TOKEN")
 
 
+_RESERVED_PAD_CANDIDATES = ("<|finetune_right_pad_id|>", "<|pad|>", "<|endoftext|>")
+
+
+def _ensure_distinct_pad_token(tokenizer) -> None:
+    """Guarantee pad_token_id != eos_token_id.
+
+    A pad that equals EOS is ambiguous everywhere it appears: generation cannot
+    tell a real stop from filler, and any value-based label masking (the HF
+    collator's rule, which `data.CausalLMCollator` replaces with positional
+    masking) would delete every EOS from the training signal so the model never
+    learns to stop. Llama-3.x reserves <|finetune_right_pad_id|> (128004) for
+    exactly this; Qwen already ships a distinct pad and is untouched here.
+
+    Keyed off the collision rather than `pad_token is None` so that tokenizer
+    dirs already saved with the poisoned pad are repaired on reload.
+    """
+    if tokenizer.pad_token is not None and tokenizer.pad_token_id != tokenizer.eos_token_id:
+        return
+    vocab = tokenizer.get_vocab()
+    for candidate in _RESERVED_PAD_CANDIDATES:
+        cid = vocab.get(candidate)
+        if cid is not None and cid != tokenizer.eos_token_id:
+            tokenizer.pad_token = candidate
+            break
+    else:
+        raise ValueError(
+            f"No reserved pad token found for {tokenizer.name_or_path!r}; "
+            "refusing to fall back to eos_token (that silently masks every EOS)."
+        )
+    if tokenizer.pad_token_id == tokenizer.eos_token_id:
+        raise ValueError("pad_token_id still equals eos_token_id after repair")
+
+
 def build_tokenizer(model_name: str = MODEL_NAME, hf_token: str | None = HF_TOKEN):
     local = Path(model_name).is_dir()
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, local_files_only=local)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    _ensure_distinct_pad_token(tokenizer)
     tokenizer.padding_side = "right"
     # Render prompts/targets with this model's native chat template (and its real
     # EOS) for every downstream load_training_dataset call in this process.
@@ -98,10 +131,14 @@ def load_base_model(
     return model
 
 
-def _tokenize_dataset(dataset, tokenizer, max_length: int):
-    return dataset.map(
-        lambda ex: tokenizer(ex["text"], truncation=True, max_length=max_length),
-        remove_columns=dataset.column_names,
+def _tokenize_dataset(dataset, tokenizer, max_length: int, *, completion_only: bool = True,
+                      log_context: str = ""):
+    return tokenize_dataset(
+        dataset,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        completion_only=completion_only,
+        log_context=log_context,
     )
 
 
@@ -278,7 +315,8 @@ def train_on_task(
     logging_steps: int = 50,
     save_steps: int = 500,
     eval_steps: int = 500,
-    max_seq_length: int = 256,
+    max_seq_length: int = 1024,
+    completion_only_loss: bool = True,
     eval_size: int = 200,
     seed: int = 42,
     use_bf16: bool = True,
@@ -337,8 +375,14 @@ def train_on_task(
                 pass
 
     train_dataset, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
-    train_dataset = _tokenize_dataset(train_dataset, tokenizer=tokenizer, max_length=max_seq_length)
-    eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
+    train_dataset = _tokenize_dataset(
+        train_dataset, tokenizer=tokenizer, max_length=max_seq_length,
+        completion_only=completion_only_loss, log_context="train",
+    )
+    eval_dataset = _tokenize_dataset(
+        eval_dataset, tokenizer=tokenizer, max_length=max_seq_length,
+        completion_only=completion_only_loss, log_context="eval",
+    )
 
     lora_cfg = build_lora_config(r=rank, lora_alpha=lora_alpha)
     lora_model = get_peft_model(model, lora_cfg)
@@ -390,6 +434,10 @@ def train_on_task(
             add_retain_grad=slice_add_retain_grad,
             rank=rank,
             max_seq_length=max_seq_length,
+            # The probe must measure the same loss training optimizes, otherwise
+            # its gradients describe a different objective than the one the init
+            # is supposed to help.
+            completion_only=completion_only_loss,
             retain_batch_size=slice_retain_batch_size,
             retain_grad_accum=slice_retain_grad_accum,
             retain_batch_size_set=slice_retain_batch_size_set,
@@ -491,7 +539,7 @@ def train_on_task(
         if callable(enable_inputs):
             enable_inputs()
 
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    data_collator = build_collator(tokenizer)
 
     trainer = _CLAuxLossTrainer(
         model=lora_model,

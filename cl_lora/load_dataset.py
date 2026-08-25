@@ -147,6 +147,7 @@ def _build_chat_prompt(instruction_text: str) -> str:
             [{"role": "user", "content": instruction_text}],
             tokenize=False,
             add_generation_prompt=True,
+            date_string="26 Jul 2024",  # pin: Llama's template otherwise calls strftime_now()
         )
     # Legacy fallback: hard-coded Llama-3 chat markup.
     return (

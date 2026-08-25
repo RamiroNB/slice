@@ -83,6 +83,7 @@ def run_eval_from_manifest(
     eval_size: Optional[int] = None,
     task_eval_samples: Optional[int] = None,
     task_eval_max_new_tokens: Optional[int] = None,
+    max_input_length: Optional[int] = None,
     seed: Optional[int] = None,
     general_eval_batch_size: int = 8,
 ) -> Dict[str, Any]:
@@ -116,6 +117,9 @@ def run_eval_from_manifest(
     resolved_eval_size: int = int(_get("eval_size", eval_size, 200))
     resolved_samples: int = int(_get("task_eval_samples", task_eval_samples, 64))
     resolved_max_new: int = int(_get("task_eval_max_new_tokens", task_eval_max_new_tokens, 64))
+    # Follow the budget this run was trained with, so eval truncates prompts the
+    # same way. Pre-fix manifests have no such key and fall back to the default.
+    resolved_max_input: int = int(_get("max_seq_length", max_input_length, 1024))
     resolved_seed: int = int(_get("seed", seed, 42))
     stage: int = int(manifest.get("stage", 0))
     trained_task: str = manifest.get("trained_task", "")
@@ -193,6 +197,7 @@ def run_eval_from_manifest(
         eval_size=resolved_eval_size,
         task_eval_samples=resolved_samples,
         task_eval_max_new_tokens=resolved_max_new,
+        max_input_length=resolved_max_input,
         quick_eval=resolved_quick,
         skip_general_eval=resolved_skip_general,
         seed=resolved_seed,
@@ -285,6 +290,8 @@ def main() -> None:
     stage_p.add_argument("--eval-size", type=int, default=None)
     stage_p.add_argument("--task-eval-samples", type=int, default=None)
     stage_p.add_argument("--task-eval-max-new-tokens", type=int, default=None)
+    stage_p.add_argument("--max-input-length", type=int, default=None,
+                       help="Override the prompt budget; defaults to the run's trained max_seq_length.")
     stage_p.add_argument("--seed", type=int, default=None)
     stage_p.add_argument("--general-eval-batch-size", type=int, default=8)
     stage_p.add_argument("--log-level", default="INFO")
@@ -309,6 +316,8 @@ def main() -> None:
     run_p.add_argument("--eval-size", type=int, default=None)
     run_p.add_argument("--task-eval-samples", type=int, default=None)
     run_p.add_argument("--task-eval-max-new-tokens", type=int, default=None)
+    run_p.add_argument("--max-input-length", type=int, default=None,
+                       help="Override the prompt budget; defaults to the run's trained max_seq_length.")
     run_p.add_argument("--seed", type=int, default=None)
     run_p.add_argument("--general-eval-batch-size", type=int, default=8)
     run_p.add_argument("--log-level", default="INFO")
@@ -349,6 +358,7 @@ def main() -> None:
             eval_size=args.eval_size,
             task_eval_samples=args.task_eval_samples,
             task_eval_max_new_tokens=args.task_eval_max_new_tokens,
+            max_input_length=args.max_input_length,
             seed=args.seed,
             general_eval_batch_size=args.general_eval_batch_size,
         )
@@ -411,6 +421,7 @@ def main() -> None:
                 eval_size=args.eval_size,
                 task_eval_samples=args.task_eval_samples,
                 task_eval_max_new_tokens=args.task_eval_max_new_tokens,
+                max_input_length=args.max_input_length,
                 seed=args.seed,
                 general_eval_batch_size=args.general_eval_batch_size,
             )
