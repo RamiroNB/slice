@@ -114,7 +114,22 @@ def compute_slice_inits(
         raise RuntimeError("No target modules matched for slice initialization.")
 
     logger.info("Matched %d target weight parameters for slice init", len(target_params))
-    current_ds, _ = load_training_dataset(task=current_task, eval_size=1, seed=config.seed)
+    # The probe must draw from the same train side the trainer does. With
+    # split_seed unset that is the legacy eval_size=1 behaviour (the partition
+    # tracks `seed`, so there is no fixed eval set to protect); with it pinned we
+    # carve out the identical held-out block, otherwise the init's gradients are
+    # computed on the very questions the run is later scored on.
+    probe_eval_size = 1 if config.split_seed is None else int(config.eval_size)
+    if config.split_seed is not None:
+        logger.info(
+            "Slice probe honouring pinned split: split_seed=%d eval_size=%d "
+            "(held-out questions excluded from the gradient probe)",
+            int(config.split_seed), probe_eval_size,
+        )
+    current_ds, _ = load_training_dataset(
+        task=current_task, eval_size=probe_eval_size, seed=config.seed,
+        split_seed=config.split_seed,
+    )
     current_ds = tokenize_dataset(
         current_ds, tokenizer=tokenizer, max_length=config.max_seq_length,
         completion_only=config.completion_only, log_context="slice/current",
@@ -164,7 +179,10 @@ def compute_slice_inits(
         if config.retain_batch_size_set == "all_tasks":
             all_retain_ds = []
             for rt in retain_tasks:
-                ds, _ = load_training_dataset(task=rt, eval_size=1, seed=config.seed)
+                ds, _ = load_training_dataset(
+                    task=rt, eval_size=probe_eval_size, seed=config.seed,
+                    split_seed=config.split_seed,
+                )
                 ds = tokenize_dataset(
                     ds, tokenizer=tokenizer, max_length=config.max_seq_length,
                     completion_only=config.completion_only, log_context="slice/retain",
@@ -182,7 +200,10 @@ def compute_slice_inits(
             steps_r = 0
             for rt in retain_tasks:
                 rt_name = getattr(rt, "name", str(rt))
-                ds, _ = load_training_dataset(task=rt, eval_size=1, seed=config.seed)
+                ds, _ = load_training_dataset(
+                    task=rt, eval_size=probe_eval_size, seed=config.seed,
+                    split_seed=config.split_seed,
+                )
                 ds = tokenize_dataset(
                     ds, tokenizer=tokenizer, max_length=config.max_seq_length,
                     completion_only=config.completion_only, log_context="slice/retain",
@@ -468,6 +489,16 @@ def load_or_compute_slice_inits(
         # must key the cache. Injected only when enabled, so inits already cached
         # under the legacy full-sequence objective stay reachable in legacy mode.
         **({"completion_only": True} if config.completion_only else {}),
+        # A pinned split changes which examples the probe may differentiate, so
+        # it must key the cache: without this a pinned-split run would silently
+        # reuse an init computed on the legacy partition -- i.e. on gradients
+        # that saw the run's own eval questions. Injected only when pinned, so
+        # legacy-mode entries stay reachable under their existing keys.
+        **(
+            {"split_seed": int(config.split_seed), "probe_eval_size": int(config.eval_size)}
+            if config.split_seed is not None
+            else {}
+        ),
         "lora": lora_payload,
         "model": {
             "class": model.__class__.__name__,

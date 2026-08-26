@@ -433,6 +433,11 @@ def train_on_task(
                 else per_device_train_batch_size
             ),
             seed=seed,
+            # Keep the init's gradient probe on the same side of the train/eval
+            # boundary as the trainer. Both are needed: split_seed picks the
+            # partition, eval_size picks where it cuts.
+            split_seed=split_seed,
+            eval_size=eval_size,
             retain_scale=slice_retain_scale,
             grad_project=slice_grad_project,
             grad_projection_mode=slice_grad_projection_mode,
