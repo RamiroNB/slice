@@ -11,6 +11,15 @@ class SliceInitConfig:
     max_steps: int = 8
     per_device_batch_size: int = 64
     seed: int = 42
+    # Pins the probe's train/eval partition to the run's, so the gradients the
+    # init decomposes never touch a held-out eval question. Left None the probe
+    # keeps its legacy behaviour (eval_size=1, partition follows `seed`), which
+    # hands it essentially the whole dataset -- fine when the eval set moves with
+    # the seed anyway, leakage once the eval set is pinned across runs. Both
+    # fields enter the cache key when split_seed is set, so an init computed
+    # under the legacy partition can never be reused for a pinned-split run.
+    split_seed: Optional[int] = None
+    eval_size: int = 200
     retain_scale: float = 1.0
     grad_project: bool = False
     grad_projection_mode: str = "per_module"
