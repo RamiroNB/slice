@@ -17,7 +17,11 @@ class SliceInitConfig:
     grad_project_always: bool = False
     add_retain_grad: bool = False
     rank: Optional[int] = None
-    max_seq_length: int = 256
+    max_seq_length: int = 1024
+    # Mask prompt tokens out of the probe's loss so the gradients it decomposes
+    # describe the task behaviour being scored, not the instruction text.
+    # Must track train_task's completion_only_loss; it also keys the init cache.
+    completion_only: bool = True
     retain_batch_size: Optional[int] = None
     retain_grad_accum: Optional[int] = None
     retain_batch_size_set: str = "all_tasks"

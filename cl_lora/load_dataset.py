@@ -113,13 +113,35 @@ def _resolve_superni_task_name(task_name: str) -> str:
     )
 
 
-def _split_dataset(dataset: Dataset, eval_size: int, seed: int) -> Tuple[Dataset, Dataset]:
-    dataset = dataset.shuffle(seed=seed)
+def _split_dataset(
+    dataset: Dataset,
+    eval_size: int,
+    seed: int,
+    split_seed: int | None = None,
+) -> Tuple[Dataset, Dataset]:
+    """Partition into train/eval.
+
+    ``split_seed`` decouples *which questions* land in the held-out set from the
+    training seed. With it unset the partition follows ``seed``, so every seed
+    scores a different eval sample and no two runs are comparable question by
+    question. Pinning it makes the eval set identical across runs, which removes
+    question-sampling noise from between-seed and between-method contrasts and
+    lets scores be paired per question.
+
+    It governs the whole partition, not just the eval side: training draws from
+    the complement, so a pinned split_seed keeps the eval questions genuinely
+    held out. Changing it (or eval_size) redraws the boundary, which is why it
+    must NOT be altered when re-scoring checkpoints trained under a different
+    value — the new eval set would contain examples those checkpoints were
+    fine-tuned on.
+    """
+    effective_seed = seed if split_seed is None else split_seed
+    dataset = dataset.shuffle(seed=effective_seed)
     if len(dataset) <= 1:
         return dataset, dataset
 
     test_size = min(eval_size, len(dataset) - 1)
-    split = dataset.train_test_split(test_size=test_size, seed=seed)
+    split = dataset.train_test_split(test_size=test_size, seed=effective_seed)
     return split["train"], split["test"]
 
 
@@ -147,6 +169,7 @@ def _build_chat_prompt(instruction_text: str) -> str:
             [{"role": "user", "content": instruction_text}],
             tokenize=False,
             add_generation_prompt=True,
+            date_string="26 Jul 2024",  # pin: Llama's template otherwise calls strftime_now()
         )
     # Legacy fallback: hard-coded Llama-3 chat markup.
     return (
@@ -294,6 +317,7 @@ def load_superni_training_dataset(
     task_name: str,
     eval_size: int = 200,
     seed: int = 42,
+    split_seed: int | None = None,
 ) -> Tuple[Dataset, Dataset]:
     resolved_name = _resolve_superni_task_name(task_name)
     url = SUPERNI_RAW_TEMPLATE.format(task_name=resolved_name)
@@ -309,7 +333,9 @@ def load_superni_training_dataset(
     definition = _to_text(definition) if definition else "Complete the task."
 
     dataset = Dataset.from_list(instances)
-    train_raw, eval_raw = _split_dataset(dataset=dataset, eval_size=eval_size, seed=seed)
+    train_raw, eval_raw = _split_dataset(
+        dataset=dataset, eval_size=eval_size, seed=seed, split_seed=split_seed,
+    )
 
     train_dataset = train_raw.map(
         lambda ex: _format_superni_instance(ex, definition=definition),
@@ -327,6 +353,7 @@ def load_trace_training_dataset(
     hf_dataset: str | None = None,
     eval_size: int = 200,
     seed: int = 42,
+    split_seed: int | None = None,
 ) -> Tuple[Dataset, Dataset]:
     # hf_dataset kept for compatibility but TRACE now loads from local TRACE benchmarks
     # first, then falls back to raw GitHub if needed.
@@ -334,7 +361,9 @@ def load_trace_training_dataset(
     dataset = _load_trace_local(task_name=task_name, split="train")
     if dataset is None:
         dataset = _load_trace_raw(task_name=task_name, split="train")
-    train_raw, eval_raw = _split_dataset(dataset=dataset, eval_size=eval_size, seed=seed)
+    train_raw, eval_raw = _split_dataset(
+        dataset=dataset, eval_size=eval_size, seed=seed, split_seed=split_seed,
+    )
 
     train_dataset = train_raw.map(
         lambda ex: _format_trace_instance(ex, task_name=task_name),
@@ -351,15 +380,21 @@ def load_training_dataset(
     task: Union[str, SuperNITask, TraceTask],
     eval_size: int = 200,
     seed: int = 42,
+    split_seed: int | None = None,
 ) -> Tuple[Dataset, Dataset]:
     """Unified loader for SuperNI and TRACE tasks.
 
     Args:
         task: SuperNI task name/NI id, SuperNITask dataclass, TRACE task name,
             or TraceTask dataclass.
+        split_seed: pins the train/eval partition independently of ``seed``.
+            See _split_dataset for why this must match what a checkpoint was
+            trained under.
     """
     if isinstance(task, SuperNITask):
-        return load_superni_training_dataset(task.name, eval_size=eval_size, seed=seed)
+        return load_superni_training_dataset(
+            task.name, eval_size=eval_size, seed=seed, split_seed=split_seed,
+        )
 
     if isinstance(task, TraceTask):
         return load_trace_training_dataset(
@@ -367,9 +402,14 @@ def load_training_dataset(
             hf_dataset=getattr(task, "hf_dataset", None),
             eval_size=eval_size,
             seed=seed,
+            split_seed=split_seed,
         )
 
     task_name = str(task)
     if task_name.startswith("task") or re.fullmatch(r"NI\d+", task_name):
-        return load_superni_training_dataset(task_name, eval_size=eval_size, seed=seed)
-    return load_trace_training_dataset(task_name=task_name, eval_size=eval_size, seed=seed)
+        return load_superni_training_dataset(
+            task_name, eval_size=eval_size, seed=seed, split_seed=split_seed,
+        )
+    return load_trace_training_dataset(
+        task_name=task_name, eval_size=eval_size, seed=seed, split_seed=split_seed,
+    )

@@ -115,7 +115,10 @@ def compute_slice_inits(
 
     logger.info("Matched %d target weight parameters for slice init", len(target_params))
     current_ds, _ = load_training_dataset(task=current_task, eval_size=1, seed=config.seed)
-    current_ds = tokenize_dataset(current_ds, tokenizer=tokenizer, max_length=config.max_seq_length)
+    current_ds = tokenize_dataset(
+        current_ds, tokenizer=tokenizer, max_length=config.max_seq_length,
+        completion_only=config.completion_only, log_context="slice/current",
+    )
     logger.info("Building current-task dataloader: dataset_size=%d batch_size=%d", len(current_ds), config.per_device_batch_size)
     current_loader = build_dataloader(
         current_ds,
@@ -162,7 +165,10 @@ def compute_slice_inits(
             all_retain_ds = []
             for rt in retain_tasks:
                 ds, _ = load_training_dataset(task=rt, eval_size=1, seed=config.seed)
-                ds = tokenize_dataset(ds, tokenizer=tokenizer, max_length=config.max_seq_length)
+                ds = tokenize_dataset(
+                    ds, tokenizer=tokenizer, max_length=config.max_seq_length,
+                    completion_only=config.completion_only, log_context="slice/retain",
+                )
                 all_retain_ds.append(ds)
             combined_ds = concatenate_datasets(all_retain_ds)
             logger.info("Retain dataloader (all_tasks): %d total samples, batch_size=%d", len(combined_ds), retain_bs)
@@ -177,7 +183,10 @@ def compute_slice_inits(
             for rt in retain_tasks:
                 rt_name = getattr(rt, "name", str(rt))
                 ds, _ = load_training_dataset(task=rt, eval_size=1, seed=config.seed)
-                ds = tokenize_dataset(ds, tokenizer=tokenizer, max_length=config.max_seq_length)
+                ds = tokenize_dataset(
+                    ds, tokenizer=tokenizer, max_length=config.max_seq_length,
+                    completion_only=config.completion_only, log_context="slice/retain",
+                )
                 logger.info("Retain dataloader (each_task): task=%s, %d samples, batch_size=%d", rt_name, len(ds), retain_bs)
                 rt_loader = build_dataloader(ds, tokenizer=tokenizer, batch_size=retain_bs, seed=config.seed)
                 # Accumulate this task's gradients straight into the shared retain
@@ -455,6 +464,10 @@ def load_or_compute_slice_inits(
         "nullspace_rank": 0 if is_lora_ga else int(config.nullspace_rank),
         "nullspace_sv_threshold": 0.0 if is_lora_ga else float(config.nullspace_sv_threshold),
         "svd_selection": str(config.svd_selection),
+        # Completion-only masking changes the loss the probe differentiates, so it
+        # must key the cache. Injected only when enabled, so inits already cached
+        # under the legacy full-sequence objective stay reachable in legacy mode.
+        **({"completion_only": True} if config.completion_only else {}),
         "lora": lora_payload,
         "model": {
             "class": model.__class__.__name__,

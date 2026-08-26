@@ -4,13 +4,21 @@ from typing import Dict, Iterable
 
 import torch
 from torch.utils.data import DataLoader
-from transformers import DataCollatorForLanguageModeling
+
+try:
+    from ..data import build_collator, tokenize_dataset as _tokenize_dataset
+except ImportError:  # script-style import (see train.py)
+    from data import build_collator, tokenize_dataset as _tokenize_dataset  # type: ignore[no-redef]
 
 
-def tokenize_dataset(dataset, tokenizer, max_length: int):
-    return dataset.map(
-        lambda ex: tokenizer(ex["text"], truncation=True, max_length=max_length),
-        remove_columns=dataset.column_names,
+def tokenize_dataset(dataset, tokenizer, max_length: int, *, completion_only: bool = True,
+                     log_context: str = ""):
+    return _tokenize_dataset(
+        dataset,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        completion_only=completion_only,
+        log_context=log_context,
     )
 
 
@@ -21,7 +29,7 @@ def model_device(model: torch.nn.Module) -> torch.device:
 
 
 def build_dataloader(dataset, tokenizer, batch_size: int, seed: int) -> DataLoader:
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    collator = build_collator(tokenizer)
     generator = torch.Generator()
     generator.manual_seed(seed)
     return DataLoader(

@@ -12,11 +12,10 @@ from typing import Any, Dict, List, Tuple
 import accelerate
 import torch
 from dotenv import load_dotenv
-from peft import get_peft_model
+from peft import get_peft_model, PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
 )
@@ -24,12 +23,14 @@ import logging
 
 try:
     from .cl_methods import CLMethod, VanillaCLMethod
+    from .data import build_collator, tokenize_dataset
     from .load_dataset import configure_prompt_tokenizer, load_training_dataset
     from .lora_config import build_lora_config
     from .repro import set_global_seed
     from .slice import SliceInitConfig, initialize_lora_with_slice
 except ImportError:
     from cl_methods import CLMethod, VanillaCLMethod  # type: ignore[no-redef]
+    from data import build_collator, tokenize_dataset  # type: ignore[no-redef]
     from load_dataset import configure_prompt_tokenizer, load_training_dataset  # type: ignore[no-redef]
     from lora_config import build_lora_config
     from repro import set_global_seed
@@ -60,11 +61,43 @@ MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 HF_TOKEN = os.getenv("HUGGING_TOKEN")
 
 
+_RESERVED_PAD_CANDIDATES = ("<|finetune_right_pad_id|>", "<|pad|>", "<|endoftext|>")
+
+
+def _ensure_distinct_pad_token(tokenizer) -> None:
+    """Guarantee pad_token_id != eos_token_id.
+
+    A pad that equals EOS is ambiguous everywhere it appears: generation cannot
+    tell a real stop from filler, and any value-based label masking (the HF
+    collator's rule, which `data.CausalLMCollator` replaces with positional
+    masking) would delete every EOS from the training signal so the model never
+    learns to stop. Llama-3.x reserves <|finetune_right_pad_id|> (128004) for
+    exactly this; Qwen already ships a distinct pad and is untouched here.
+
+    Keyed off the collision rather than `pad_token is None` so that tokenizer
+    dirs already saved with the poisoned pad are repaired on reload.
+    """
+    if tokenizer.pad_token is not None and tokenizer.pad_token_id != tokenizer.eos_token_id:
+        return
+    vocab = tokenizer.get_vocab()
+    for candidate in _RESERVED_PAD_CANDIDATES:
+        cid = vocab.get(candidate)
+        if cid is not None and cid != tokenizer.eos_token_id:
+            tokenizer.pad_token = candidate
+            break
+    else:
+        raise ValueError(
+            f"No reserved pad token found for {tokenizer.name_or_path!r}; "
+            "refusing to fall back to eos_token (that silently masks every EOS)."
+        )
+    if tokenizer.pad_token_id == tokenizer.eos_token_id:
+        raise ValueError("pad_token_id still equals eos_token_id after repair")
+
+
 def build_tokenizer(model_name: str = MODEL_NAME, hf_token: str | None = HF_TOKEN):
     local = Path(model_name).is_dir()
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, local_files_only=local)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    _ensure_distinct_pad_token(tokenizer)
     tokenizer.padding_side = "right"
     # Render prompts/targets with this model's native chat template (and its real
     # EOS) for every downstream load_training_dataset call in this process.
@@ -98,10 +131,14 @@ def load_base_model(
     return model
 
 
-def _tokenize_dataset(dataset, tokenizer, max_length: int):
-    return dataset.map(
-        lambda ex: tokenizer(ex["text"], truncation=True, max_length=max_length),
-        remove_columns=dataset.column_names,
+def _tokenize_dataset(dataset, tokenizer, max_length: int, *, completion_only: bool = True,
+                      log_context: str = ""):
+    return tokenize_dataset(
+        dataset,
+        tokenizer=tokenizer,
+        max_length=max_length,
+        completion_only=completion_only,
+        log_context=log_context,
     )
 
 
@@ -181,6 +218,22 @@ def load_model_with_adapters(
     model = load_base_model(
         base_model_path, hf_token=hf_token, torch_dtype=torch_dtype, device_map=device_map
     )
+
+    # SD-LoRA checkpoints are not mergeable adapters: each stage drops a
+    # cumulative sd_lora_state.pt (frozen net-update blocks + trainable scalars)
+    # next to its adapter. Reconstruct W0 + sum_i s_i D_i by baking the state of
+    # the final stage into the pristine base weights.
+    if adapter_paths:
+        sdlora_state_path = Path(adapter_paths[-1]) / "sd_lora_state.pt"
+        if sdlora_state_path.exists():
+            try:
+                from .cl_methods.sd_lora import bake_sdlora_into_model
+            except ImportError:
+                from cl_methods.sd_lora import bake_sdlora_into_model  # type: ignore[no-redef]
+            state = torch.load(str(sdlora_state_path), map_location="cpu", weights_only=False)
+            bake_sdlora_into_model(model, state)
+            return model
+
     for adapter_path in adapter_paths:
         model = PeftModel.from_pretrained(model, adapter_path)
         init_correction_path = Path(adapter_path) / "init_correction.pt"
@@ -257,12 +310,19 @@ def train_on_task(
     per_device_train_batch_size: int = 16,
     per_device_eval_batch_size: int = 8,
     gradient_accumulation_steps: int = 2,
+    gradient_checkpointing: bool = False,
+    slice_probe_batch_size: int | None = None,
     logging_steps: int = 50,
     save_steps: int = 500,
     eval_steps: int = 500,
-    max_seq_length: int = 256,
+    max_seq_length: int = 1024,
+    completion_only_loss: bool = True,
     eval_size: int = 200,
     seed: int = 42,
+    # Pins the train/eval partition independently of `seed`. Training must use
+    # the same value the eval will use, otherwise the held-out questions end up
+    # in this task's training data.
+    split_seed: int | None = None,
     use_bf16: bool = True,
     save_adapter: bool = True,
     save_intermediate_checkpoints: bool = False,
@@ -301,14 +361,52 @@ def train_on_task(
         (model_after_stage, training_report)
     """
     set_global_seed(seed)
-    train_dataset, eval_dataset = load_training_dataset(task=task, eval_size=eval_size, seed=seed)
-    train_dataset = _tokenize_dataset(train_dataset, tokenizer=tokenizer, max_length=max_seq_length)
-    eval_dataset = _tokenize_dataset(eval_dataset, tokenizer=tokenizer, max_length=max_seq_length)
+
+    # SD-LoRA (and any no-merge CL method) keeps the model wrapped across stages
+    # so previous-task directions stay live. Unwrap the incoming PeftModel back to
+    # the pristine base before starting a fresh adapter for this task.
+    sd_lora_mode = bool(getattr(cl_method, "requires_no_merge", False))
+    force_skip_absorption = bool(getattr(cl_method, "requires_skip_absorption", False))
+    if isinstance(model, PeftModel):
+        model = model.unload()
+        # unload() leaves a lingering `peft_config` attribute on the base model;
+        # drop it so the fresh get_peft_model() below doesn't warn about (or stack)
+        # multiple adapters.
+        if hasattr(model, "peft_config"):
+            try:
+                del model.peft_config
+            except AttributeError:
+                pass
+
+    train_dataset, eval_dataset = load_training_dataset(
+        task=task, eval_size=eval_size, seed=seed, split_seed=split_seed,
+    )
+    train_dataset = _tokenize_dataset(
+        train_dataset, tokenizer=tokenizer, max_length=max_seq_length,
+        completion_only=completion_only_loss, log_context="train",
+    )
+    eval_dataset = _tokenize_dataset(
+        eval_dataset, tokenizer=tokenizer, max_length=max_seq_length,
+        completion_only=completion_only_loss, log_context="eval",
+    )
 
     lora_cfg = build_lora_config(r=rank, lora_alpha=lora_alpha)
     lora_model = get_peft_model(model, lora_cfg)
     active_adapter = "default"
     lora_model.print_trainable_parameters()
+
+    # Let a no-merge CL method install its accumulated previous-task state BEFORE
+    # the init runs, so the init's gradient probe measures at the model's real
+    # operating point (W0 + sum_i s_i D_i) instead of at a pristine W0. Critical
+    # for the retain gradient: at pristine W0 the model hasn't learned the prior
+    # tasks, so g_r would describe "learn them" rather than "where retention
+    # degrades", and the conflict projection would gate on the wrong signal.
+    if cl_method is not None:
+        cl_method.before_init(
+            lora_model,
+            stage_idx=int(stage_idx),
+            retain_tasks=retain_tasks,
+        )
 
     slice_projection_summary: dict | None = None
     if slice_enabled:
@@ -316,11 +414,24 @@ def train_on_task(
             getattr(getattr(model, "config", None), "_name_or_path", None)
             or getattr(model, "name_or_path", None)
         )
+        _cache_ctx = slice_cache_context or (str(model_id) if model_id else None)
+        if sd_lora_mode:
+            # The probe now runs against W0 + sum_i s_i D_i, so its gradients are
+            # not interchangeable with a merge-pipeline entry for the same stage.
+            _cache_ctx = f"{_cache_ctx}|sdlora_accum"
         slice_config = SliceInitConfig(
             cache_dir=slice_cache_dir,
-            cache_context=slice_cache_context or (str(model_id) if model_id else None),
+            cache_context=_cache_ctx,
             max_steps=slice_max_steps,
-            per_device_batch_size=per_device_train_batch_size,
+            # Kept separate from the training batch size on purpose: the probe
+            # batch feeds the init's gradient estimate AND the slice cache key, so
+            # lowering the training batch for memory must not silently change the
+            # init or invalidate cached inits.
+            per_device_batch_size=(
+                slice_probe_batch_size
+                if slice_probe_batch_size is not None
+                else per_device_train_batch_size
+            ),
             seed=seed,
             retain_scale=slice_retain_scale,
             grad_project=slice_grad_project,
@@ -329,6 +440,10 @@ def train_on_task(
             add_retain_grad=slice_add_retain_grad,
             rank=rank,
             max_seq_length=max_seq_length,
+            # The probe must measure the same loss training optimizes, otherwise
+            # its gradients describe a different objective than the one the init
+            # is supposed to help.
+            completion_only=completion_only_loss,
             retain_batch_size=slice_retain_batch_size,
             retain_grad_accum=slice_retain_grad_accum,
             retain_batch_size_set=slice_retain_batch_size_set,
@@ -345,6 +460,9 @@ def train_on_task(
             nullspace_rank=slice_nullspace_rank,
             nullspace_sv_threshold=slice_nullspace_sv_threshold,
             svd_selection=slice_svd_selection,
+            # SD-LoRA keeps W0 pristine (absorption is realized in the forward
+            # override), so never physically absorb into the base weights here.
+            skip_absorption=force_skip_absorption,
         )
         # propagate PEFT lora settings into slice config when available
         try:
@@ -377,6 +495,11 @@ def train_on_task(
     else:
         lora_init_correction = {}
 
+    if sd_lora_mode:
+        # SD-LoRA stores each task's init inside its frozen block and never
+        # absorbs into the base, so there is no absorption to replay at eval time.
+        lora_init_correction = {}
+
     # CL-method pre-training hook (fires AFTER init_correction capture so
     # absorption replay at eval time still reflects the actual A_init/B_init
     # used to modify the base weights).
@@ -407,13 +530,22 @@ def train_on_task(
         eval_strategy="steps",
         eval_steps=eval_steps,
         bf16=use_bf16,
+        gradient_checkpointing=bool(gradient_checkpointing),
+        gradient_checkpointing_kwargs={"use_reentrant": False} if gradient_checkpointing else None,
         dataloader_num_workers=2,
         report_to="none",
         remove_unused_columns=True,
         seed=seed,
     )
 
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    if gradient_checkpointing:
+        # With a frozen base, a checkpointed segment can otherwise receive no
+        # grad-requiring input and silently produce no gradients.
+        enable_inputs = getattr(lora_model, "enable_input_require_grads", None)
+        if callable(enable_inputs):
+            enable_inputs()
+
+    data_collator = build_collator(tokenizer)
 
     trainer = _CLAuxLossTrainer(
         model=lora_model,
@@ -456,8 +588,23 @@ def train_on_task(
         if lora_init_correction:
             torch.save(lora_init_correction, adapter_cp / "init_correction.pt")
 
-    merge_fn = getattr(lora_model, "merge_and_unload", None)
-    post_stage_model = merge_fn() if callable(merge_fn) else lora_model
+    if sd_lora_mode:
+        # Persist the cumulative SD-LoRA state (frozen blocks + scalars) next to
+        # the adapter checkpoint so standalone eval can bake W0 + sum s_i D_i.
+        # Written to ONE location only: the state is cumulative and grows with the
+        # stage index, so duplicating it into the train output dir doubles disk for
+        # no benefit (eval_manifest points at the checkpoint adapter).
+        if adapter_checkpoint_path:
+            cl_method.save(str(Path(adapter_checkpoint_path)))
+        elif save_adapter:
+            cl_method.save(str(output_path / "adapter"))
+        # Keep the override live and unmerged: the trained model already equals
+        # W0 + sum s_i D_i for in-run eval, and unload() restores a pristine base
+        # for the next stage.
+        post_stage_model = lora_model
+    else:
+        merge_fn = getattr(lora_model, "merge_and_unload", None)
+        post_stage_model = merge_fn() if callable(merge_fn) else lora_model
     trainer.save_state()
 
     def _maybe_to_dict(obj: Any) -> Any:

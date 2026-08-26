@@ -396,13 +396,13 @@ def compute_task_gradient(
     *,
     max_steps: int = 4,
     batch_size: int = 4,
-    max_seq_length: int = 256,
+    max_seq_length: int = 1024,
     seed: int = 42,
 ) -> Dict[str, torch.Tensor]:
     """Average per-step gradient on one task's training data, base model only."""
     import torch
     from torch.utils.data import DataLoader
-    from transformers import DataCollatorForLanguageModeling
+    from .data import build_collator
     from .lora_config import build_lora_config
     from .load_dataset import load_training_dataset
     from .slice.gradients import accumulate_gradients
@@ -420,7 +420,7 @@ def compute_task_gradient(
     # num_workers=0: no subprocess spawning — avoids dill/tempfile crash when
     # /tmp is absent on the server. Single-process dataloading is fine here
     # since the bottleneck is the backward pass, not data I/O.
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    collator = build_collator(tokenizer)
     generator = torch.Generator()
     generator.manual_seed(seed)
     loader = DataLoader(
@@ -514,7 +514,7 @@ def analyze_sequence(
     model_name: str | None = None,
     max_steps: int = 4,
     batch_size: int = 4,
-    max_seq_length: int = 256,
+    max_seq_length: int = 1024,
     seed: int = 42,
 ) -> Dict[str, Dict[str, float]]:  # keys are "current|retain"
     """Load base model, compute per-task gradients, report all ordered pairs.
@@ -624,7 +624,7 @@ def search_opposite_pairs(
     model_name: str | None = None,
     max_steps: int = 4,
     batch_size: int = 4,
-    max_seq_length: int = 256,
+    max_seq_length: int = 1024,
     seed: int = 42,
     top_k: int = 10,
     cache_dir: str | None = None,
@@ -851,7 +851,7 @@ def main() -> None:
     parser.add_argument("--model-name", default=None, help="Override base model.")
     parser.add_argument("--max-steps", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--max-seq-length", type=int, default=256)
+    parser.add_argument("--max-seq-length", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument(

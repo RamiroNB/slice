@@ -212,12 +212,17 @@ def run_sequence(
     eval_size: int,
     task_eval_samples: int,
     task_eval_max_new_tokens: int,
+    split_seed: int | None,
     quick_eval: bool,
     save_final_model: bool,
     resume: bool,
     rank: int,
     lora_alpha: int,
     warmup_ratio: float,
+    per_device_train_batch_size: int,
+    gradient_accumulation_steps: int,
+    gradient_checkpointing: bool,
+    slice_probe_batch_size: int | None,
     slice_enabled: bool,
     slice_cache_dir: str,
     slice_max_steps: int,
@@ -251,6 +256,8 @@ def run_sequence(
     cl_method_kwargs: Dict[str, Any] | None = None,
     orchestrator_config: Dict[str, Any] | None = None,
     base_model_cache_dir: str | None = None,
+    completion_only_loss: bool = True,
+    max_seq_length: int = 1024,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
     run_output_dir = run_output_dir.resolve()
@@ -269,8 +276,15 @@ def run_sequence(
         "eval_size": int(eval_size),
         "task_eval_samples": int(task_eval_samples),
         "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
+        "split_seed": split_seed,
         "rank": int(rank),
         "lora_alpha": int(lora_alpha),
+        "per_device_train_batch_size": int(per_device_train_batch_size),
+        "gradient_accumulation_steps": int(gradient_accumulation_steps),
+        "gradient_checkpointing": bool(gradient_checkpointing),
+        "completion_only_loss": bool(completion_only_loss),
+        "max_seq_length": int(max_seq_length),
+        "slice_probe_batch_size": slice_probe_batch_size,
         "slice_enabled": bool(slice_enabled),
         "slice_cache_dir": slice_cache_dir,
         "slice_max_steps": int(slice_max_steps),
@@ -409,7 +423,7 @@ def run_sequence(
             )
 
     # Build the CL method object once per run. Persistent state (O-LoRA A
-    # snapshots) lives under <run>/cl_state/ and is reloaded on resume so
+    # snapshots, InfLoRA covariance) lives under <run>/cl_state/ and is reloaded on resume so
     # the per-stage history carries across runs.
     cl_state_dir = run_output_dir / "cl_state"
     cl_state_dir.mkdir(parents=True, exist_ok=True)
@@ -447,10 +461,15 @@ def run_sequence(
             output_dir=str(stage_train_dir),
             eval_size=eval_size,
             seed=seed,
+            split_seed=split_seed,
             retain_tasks=retain_tasks,
             rank=rank,
             lora_alpha=lora_alpha,
             warmup_ratio=warmup_ratio,
+            per_device_train_batch_size=per_device_train_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            gradient_checkpointing=gradient_checkpointing,
+            slice_probe_batch_size=slice_probe_batch_size,
             adapter_checkpoint_path=str(adapter_checkpoint_dir),
             slice_enabled=slice_enabled,
             slice_cache_dir=slice_cache_dir,
@@ -478,6 +497,8 @@ def run_sequence(
             slice_nullspace_rank=slice_nullspace_rank,
             slice_nullspace_sv_threshold=slice_nullspace_sv_threshold,
             slice_svd_selection=slice_svd_selection,
+            completion_only_loss=completion_only_loss,
+            max_seq_length=max_seq_length,
             cl_method=cl_method,
             stage_idx=idx,
         )
@@ -529,7 +550,13 @@ def run_sequence(
                 "eval_size": int(eval_size),
                 "task_eval_samples": int(task_eval_samples),
                 "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
+                # So a standalone eval pass truncates prompts the same way
+                # this run was trained, whatever --max-seq-length was used.
+                "max_seq_length": int(max_seq_length),
                 "seed": int(seed),
+                # The eval set is only held out if a replay uses the same value
+                # this stage trained under; eval_standalone reads it from here.
+                "split_seed": split_seed,
                 "train_output_dir": str(stage_train_dir),
                 "cl_method": cl_method.name,
             },
@@ -556,9 +583,11 @@ def run_sequence(
                 eval_size=eval_size,
                 task_eval_samples=task_eval_samples,
                 task_eval_max_new_tokens=task_eval_max_new_tokens,
+                max_input_length=max_seq_length,
                 quick_eval=quick_eval,
                 skip_general_eval=skip_general,
                 seed=seed,
+                split_seed=split_seed,
             )
             stage_record = {
                 "stage": idx,
@@ -652,6 +681,19 @@ def main() -> None:
     parser.add_argument("--eval-size", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42, help="Global RNG seed for reproducibility.")
     parser.add_argument("--task-eval-samples", type=int, default=64)
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=None,
+        help=(
+            "Pin the train/eval partition to this seed instead of --seed, so every "
+            "run scores the identical held-out questions. Removes question-sampling "
+            "noise from between-seed and between-method contrasts and makes "
+            "question-level paired inference possible. Governs training too: the "
+            "model trains on the complement, so the eval questions stay genuinely "
+            "held out. Leave unset to keep the legacy seed-coupled split."
+        ),
+    )
     parser.add_argument("--task-eval-max-new-tokens", type=int, default=64)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--resume", action="store_true")
@@ -677,6 +719,45 @@ def main() -> None:
         type=float,
         default=0.01,
         help="Warmup ratio for the LR scheduler (TrainingArguments.warmup_ratio). Defaults to 0.01.",
+    )
+    parser.add_argument(
+        "--per-device-train-batch-size", type=int, default=16,
+        help="Training micro-batch size. Lower it to cut activation/logit memory; "
+             "raise --gradient-accumulation-steps to keep the effective batch fixed. "
+             "Does NOT change the init gradient probe (see --slice-probe-batch-size).",
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps", type=int, default=2,
+        help="Gradient accumulation steps. Effective batch = per-device batch x this.",
+    )
+    parser.add_argument(
+        "--gradient-checkpointing", action="store_true",
+        help="Recompute activations in backward instead of storing them. Large memory "
+             "saving for ~20-30%% slowdown, and numerically exact -- it changes no "
+             "results and no slice cache keys. Recommended for --cl-method sd_lora, "
+             "which additionally holds every previous task's frozen block.",
+    )
+    parser.add_argument(
+        "--max-seq-length", type=int, default=1024,
+        help="Token budget for training sequences (prompt+target) and for the SLICE "
+             "probe. At the old default of 256, 41%% of examples on this benchmark were "
+             "truncated and the long-input tasks lost their target entirely; 1024 leaves "
+             "97.7%% intact. Lower it to trade coverage for memory. Keys the slice cache.",
+    )
+    parser.add_argument(
+        "--no-completion-only-loss", dest="completion_only_loss", action="store_false",
+        help="Legacy objective: supervise every token of prompt+target instead of "
+             "masking the prompt. Only for reproducing pre-fix runs -- on these "
+             "benchmarks the prompt carries >98%% of the tokens, so the loss (and the "
+             "gradients the SLICE probe decomposes) is dominated by instruction text "
+             "rather than by the answer eval scores.",
+    )
+    parser.set_defaults(completion_only_loss=True)
+    parser.add_argument(
+        "--slice-probe-batch-size", type=int, default=None,
+        help="Batch size for the init's gradient probe. Defaults to the training batch "
+             "size (current behavior). Pin it when lowering the training batch for "
+             "memory, so the init gradients and slice cache entries stay unchanged.",
     )
     parser.add_argument("--slice-grad-project", action="store_true", help="Project current-task gradients against retain gradients for slice init.")
     parser.add_argument(
@@ -740,9 +821,37 @@ def main() -> None:
         help="Continual-learning training method (composes with any LoRA init). "
              "'vanilla' (default) is the existing per-stage train+merge pipeline. "
              "'o_lora' adds an orthogonality regularizer between current and prior "
-             "task A matrices.")
+             "task A matrices. 'inflora' projects the new task's A onto the null "
+             "space of the accumulated past-task input-feature covariance. "
+             "'sd_lora' keeps every task's frozen net-update "
+             "direction live (no merge) with trainable per-task magnitude scalars "
+             "(pair with --slice-init for SD-LoRA + SLICE).")
     parser.add_argument("--cl-o-lora-lambda", type=float, default=0.5,
         help="O-LoRA orthogonality regularizer weight. Used only when --cl-method=o_lora.")
+    parser.add_argument("--cl-inflora-nullspace-rank", type=int, default=256,
+        help="CAP on the number of past-task input directions InfLoRA projects A out of "
+             "(also the rank of the covariance sketch). NOT the LoRA rank -- see --rank. "
+             "The per-module k is picked by --cl-inflora-nullspace-energy and additionally "
+             "clamped to d_in - r so A keeps at least r free input directions. "
+             "Default 256 = 4x the rank-64 adapters. Used only when --cl-method=inflora.")
+    parser.add_argument("--cl-inflora-nullspace-energy", type=float, default=0.99,
+        help="Fraction of the accumulated past-input covariance trace the projected-out "
+             "subspace must cover, per module (Adam-NSCL / InfLoRA style spectrum rule). "
+             "Set outside (0, 1) to use a fixed k = --cl-inflora-nullspace-rank everywhere.")
+    parser.add_argument("--cl-inflora-max-cov-batches", type=int, default=32,
+        help="Forward batches per stage used to estimate the input covariance. "
+             "Used only when --cl-method=inflora.")
+    parser.add_argument("--cl-inflora-cov-batch-size", type=int, default=8,
+        help="Batch size used during InfLoRA covariance estimation forward passes.")
+    parser.add_argument("--cl-inflora-cov-store", choices=["sketch", "full"], default="sketch",
+        help="How InfLoRA stores the accumulated covariance. 'sketch' (default) keeps a "
+             "row factor F of rank --cl-inflora-nullspace-rank with C ~= F^T F (980MB for "
+             "Qwen3-4B at cap 256); 'full' materializes the exact dense (d_in, d_in) "
+             "covariance per module, which is 20.8GB of RAM and per-stage disk for the "
+             "same model.")
+    parser.add_argument("--cl-inflora-cov-sample-rows", type=int, default=32,
+        help="Activation rows sampled per covariance batch per module when "
+             "--cl-inflora-cov-store=sketch. Ignored for 'full'.")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
         help="Keep all intermediate stage checkpoints. By default only the latest is kept.")
     parser.add_argument("--save-checkpoints", action="store_true",
@@ -820,12 +929,19 @@ def main() -> None:
         eval_size=args.eval_size,
         task_eval_samples=args.task_eval_samples,
         task_eval_max_new_tokens=args.task_eval_max_new_tokens,
+        split_seed=args.split_seed,
         quick_eval=args.quick_eval,
         save_final_model=args.save_final_model,
         resume=args.resume,
         rank=args.rank,
         lora_alpha=args.lora_alpha,
         warmup_ratio=args.warmup_ratio,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        gradient_checkpointing=args.gradient_checkpointing,
+        completion_only_loss=args.completion_only_loss,
+        max_seq_length=args.max_seq_length,
+        slice_probe_batch_size=args.slice_probe_batch_size,
         slice_enabled=args.slice_init,
         slice_cache_dir=args.slice_cache_dir,
         slice_max_steps=args.slice_max_steps,
@@ -858,7 +974,13 @@ def main() -> None:
         cl_method_name=args.cl_method,
         cl_method_kwargs={
             "lambda_orth": args.cl_o_lora_lambda,
-            "max_seq_length": 256,
+            "nullspace_rank": args.cl_inflora_nullspace_rank,
+            "nullspace_energy": args.cl_inflora_nullspace_energy,
+            "max_cov_batches": args.cl_inflora_max_cov_batches,
+            "cov_batch_size": args.cl_inflora_cov_batch_size,
+            "cov_store": args.cl_inflora_cov_store,
+            "cov_sample_rows": args.cl_inflora_cov_sample_rows,
+            "max_seq_length": args.max_seq_length,
             "seed": args.seed,
         },
         orchestrator_config=orchestrator_config,
