@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import random
 
@@ -77,3 +78,57 @@ def set_global_seed(
         hf_set_seed(seed)
     except Exception:
         pass
+
+
+@contextlib.contextmanager
+def preserve_rng_state():
+    """Snapshot the global RNGs on entry and restore them on exit.
+
+    Lets an evaluation run in the middle of a pipeline without shifting the RNG
+    stream the surrounding training consumes — so, e.g., adding the stage-0
+    baseline before stage 1 leaves the trained weights bit-identical to a run
+    without it.
+    """
+    py_state = random.getstate()
+
+    np_state = None
+    try:
+        import numpy as np  # type: ignore
+
+        np_state = np.random.get_state()
+    except Exception:
+        pass
+
+    torch_state = None
+    cuda_states = None
+    try:
+        import torch
+
+        torch_state = torch.get_rng_state()
+        if torch.cuda.is_available():
+            cuda_states = torch.cuda.get_rng_state_all()
+    except Exception:
+        pass
+
+    try:
+        yield
+    finally:
+        random.setstate(py_state)
+
+        if np_state is not None:
+            try:
+                import numpy as np  # type: ignore
+
+                np.random.set_state(np_state)
+            except Exception:
+                pass
+
+        if torch_state is not None:
+            try:
+                import torch
+
+                torch.set_rng_state(torch_state)
+                if cuda_states is not None:
+                    torch.cuda.set_rng_state_all(cuda_states)
+            except Exception:
+                pass

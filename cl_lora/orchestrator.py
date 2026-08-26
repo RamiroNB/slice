@@ -21,7 +21,7 @@ try:
     from .cl_methods import REGISTRY as CL_METHOD_REGISTRY, build_cl_method
     from .eval import evaluate_all
     from .metrics import compute_cl_metrics
-    from .repro import set_global_seed
+    from .repro import preserve_rng_state, set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
     from .train import (
         HF_TOKEN, MODEL_NAME,
@@ -33,7 +33,7 @@ except ImportError:
     from cl_methods import REGISTRY as CL_METHOD_REGISTRY, build_cl_method  # type: ignore[no-redef]
     from eval import evaluate_all
     from metrics import compute_cl_metrics
-    from repro import set_global_seed
+    from repro import preserve_rng_state, set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
     from train import (  # type: ignore[no-redef]
         HF_TOKEN, MODEL_NAME,
@@ -202,6 +202,25 @@ def _collect_tokenizer_info(tokenizer) -> Dict[str, Any]:
     }
 
 
+STAGE_ZERO_DIR_NAME = "stage_00_base"
+
+
+def _load_stage_zero_record(run_output_dir: Path) -> Dict[str, Any] | None:
+    """Read a previously computed stage-0 baseline from disk, if any.
+
+    Stage 0 is the pristine pre-trained model — no adapter of any stage is
+    loaded or merged — scored on every task in the sequence.
+    """
+    path = run_output_dir / "stages" / STAGE_ZERO_DIR_NAME / "stage_record.json"
+    if not path.exists():
+        return None
+    try:
+        record = _read_json(path)
+    except Exception:
+        return None
+    return record if record.get("seen_tasks") else None
+
+
 def run_sequence(
     sequence_name: str,
     model_name: str,
@@ -210,7 +229,7 @@ def run_sequence(
     general_eval_keys: List[str],
     seed: int,
     eval_size: int,
-    task_eval_samples: int,
+    task_eval_samples: int | None,
     task_eval_max_new_tokens: int,
     split_seed: int | None,
     quick_eval: bool,
@@ -249,6 +268,8 @@ def run_sequence(
     slice_svd_selection: str = "lora_ga",
     keep_all_checkpoints: bool = False,
     save_intermediate_checkpoints: bool = False,
+    stage_zero_eval: bool = True,
+    stage_zero_general_eval: bool = False,
     general_eval_strategy: str = "every_stage",
     seen_eval_strategy: str = "full_matrix",
     train_only: bool = False,
@@ -265,6 +286,10 @@ def run_sequence(
     run_output_dir.mkdir(parents=True, exist_ok=True)
     sequence = get_sequence(sequence_name)
     task_order = [task.name for task in sequence.tasks]
+
+    # Unset means "score every held-out question"; the split is the ceiling.
+    if task_eval_samples is None:
+        task_eval_samples = int(eval_size)
 
     resolved_cfg: Dict[str, Any] = {
         "sequence": sequence_name,
@@ -300,6 +325,8 @@ def run_sequence(
         "slice_init_method": slice_init_method,
         "keep_all_checkpoints": keep_all_checkpoints,
         "save_intermediate_checkpoints": save_intermediate_checkpoints,
+        "stage_zero_eval": bool(stage_zero_eval),
+        "stage_zero_general_eval": bool(stage_zero_general_eval),
         "general_eval_strategy": general_eval_strategy,
         "seen_eval_strategy": seen_eval_strategy,
         "cl_method": str(cl_method_name),
@@ -331,6 +358,9 @@ def run_sequence(
     stage_records: List[Dict[str, Any]] = []
     start_stage = 1
     seen_tasks = []
+    # The pre-training baseline: base model, no adapters, every task in the
+    # sequence. Kept out of stage_records so the AP diagonal stays aligned.
+    stage_zero_record: Dict[str, Any] | None = _load_stage_zero_record(run_output_dir)
 
     if resume and partial_path.exists():
         partial = _read_json(partial_path)
@@ -345,12 +375,17 @@ def run_sequence(
         seen_tasks = sequence.tasks[:completed]
 
         if completed >= len(sequence.tasks):
-            summary = compute_cl_metrics(stage_records=stage_records, task_order=task_order)
+            summary = compute_cl_metrics(
+                stage_records=stage_records,
+                task_order=task_order,
+                stage_zero_record=stage_zero_record,
+            )
             final_payload = {
                 "sequence": sequence_name,
                 "description": sequence.description,
                 "task_order": task_order,
                 "general_eval_keys": general_eval_keys,
+                "stage_zero": stage_zero_record,
                 "stage_records": stage_records,
                 "summary": summary,
             }
@@ -421,6 +456,81 @@ def run_sequence(
             raise FileNotFoundError(
                 f"Resuming at stage {start_stage} but base model checkpoint not found at {base_model_ckpt}."
             )
+
+    # -- Stage 0: the untouched pre-trained model, scored on every task in the
+    # sequence. This is the AP/FP baseline row — no adapter from any stage is
+    # loaded or merged, so it is only ever run while `model` is still pristine
+    # (start_stage == 1). The manifest is written unconditionally so a later
+    # `eval_standalone run` can fill in the baseline for a resumed/train-only run.
+    if stage_zero_eval:
+        stage_zero_dir = run_output_dir / "stages" / STAGE_ZERO_DIR_NAME
+        stage_zero_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            stage_zero_dir / "eval_manifest.json",
+            {
+                "stage": 0,
+                "trained_task": "",
+                "sequence": sequence_name,
+                "seen_tasks": task_order,
+                "eval_seen_tasks": task_order,
+                "base_model_path": str(base_model_ckpt.resolve()),
+                # Empty on purpose: stage 0 is the base model by itself.
+                "adapter_paths": [],
+                "general_eval_keys": general_eval_keys,
+                "skip_general_eval": not stage_zero_general_eval,
+                "quick_eval": bool(quick_eval),
+                "eval_size": int(eval_size),
+                "task_eval_samples": int(task_eval_samples),
+                "task_eval_max_new_tokens": int(task_eval_max_new_tokens),
+                "max_seq_length": int(max_seq_length),
+                "seed": int(seed),
+                "split_seed": split_seed,
+                "train_output_dir": "",
+                "cl_method": str(cl_method_name),
+            },
+        )
+
+        if stage_zero_record is not None:
+            print("\n=== Stage 0 (base model) | reusing existing baseline ===")
+        elif train_only:
+            print("\n=== Stage 0 (base model) | manifest written, eval skipped (--train-only) ===")
+        elif start_stage > 1:
+            print(
+                "\n=== Stage 0 (base model) | skipped: resuming at stage "
+                f"{start_stage}, adapters are already merged into the model. "
+                "Run `eval_standalone stage --stage-dir "
+                f"{run_output_dir / 'stages' / STAGE_ZERO_DIR_NAME}` to fill it in. ==="
+            )
+        else:
+            print(f"\n=== Stage 0 (base model) | Evaluating {len(sequence.tasks)} task(s) ===")
+            # Restore the RNG stream afterwards: stage 0 runs before any
+            # training, so it must not shift the randomness stage 1 consumes.
+            # With the guard, --no-stage0-eval and the default produce
+            # identical trained adapters.
+            with preserve_rng_state():
+                zero_evaluation = evaluate_all(
+                    model=model,
+                    tokenizer=tokenizer,
+                    seen_tasks=list(sequence.tasks),
+                    output_dir=str(stage_zero_dir),
+                    general_eval_task_keys=general_eval_keys,
+                    eval_size=eval_size,
+                    task_eval_samples=task_eval_samples,
+                    task_eval_max_new_tokens=task_eval_max_new_tokens,
+                    max_input_length=max_seq_length,
+                    quick_eval=quick_eval,
+                    skip_general_eval=not stage_zero_general_eval,
+                    seed=seed,
+                    split_seed=split_seed,
+                )
+            stage_zero_record = {
+                "stage": 0,
+                "trained_task": "",
+                "train_report": {},
+                "seen_tasks": zero_evaluation["seen_tasks"],
+                "general": zero_evaluation["general"],
+            }
+            _write_json(stage_zero_dir / "stage_record.json", stage_zero_record)
 
     # Build the CL method object once per run. Persistent state (O-LoRA A
     # snapshots, InfLoRA covariance) lives under <run>/cl_state/ and is reloaded on resume so
@@ -607,6 +717,7 @@ def run_sequence(
                 "sequence": sequence_name,
                 "task_order": task_order,
                 "completed_stages": idx,
+                "stage_zero": stage_zero_record,
                 "stage_records": stage_records,
             },
         )
@@ -619,6 +730,7 @@ def run_sequence(
             "sequence": sequence_name,
             "description": sequence.description,
             "task_order": task_order,
+            "stage_zero": stage_zero_record,
             "stage_records": stage_records,
             "summary": None,
         }
@@ -626,12 +738,17 @@ def run_sequence(
         print("\nTraining complete. Run eval separately with:")
         print(f"  python -m cl_lora.eval_standalone run --run-dir {run_output_dir}")
     else:
-        summary = compute_cl_metrics(stage_records=stage_records, task_order=task_order)
+        summary = compute_cl_metrics(
+            stage_records=stage_records,
+            task_order=task_order,
+            stage_zero_record=stage_zero_record,
+        )
         final_payload = {
             "sequence": sequence_name,
             "description": sequence.description,
             "task_order": task_order,
             "general_eval_keys": general_eval_keys,
+            "stage_zero": stage_zero_record,
             "stage_records": stage_records,
             "summary": summary,
         }
@@ -680,7 +797,30 @@ def main() -> None:
     )
     parser.add_argument("--eval-size", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42, help="Global RNG seed for reproducibility.")
-    parser.add_argument("--task-eval-samples", type=int, default=64)
+    parser.add_argument(
+        "--task-eval-samples",
+        type=int,
+        default=None,
+        help="Questions scored per seen task. Defaults to --eval-size, i.e. the whole "
+             "held-out split — that split is the hard ceiling anyway, so anything "
+             "smaller just discards held-out questions. Pass an int to score a subset.",
+    )
+    parser.add_argument(
+        "--no-stage0-eval",
+        dest="stage_zero_eval",
+        action="store_false",
+        help="Skip the stage-0 baseline. By default the run first scores the "
+             "untouched pre-trained model (no adapters at all) on every task in the "
+             "sequence, writing stages/stage_00_base/ and reporting it as ZS.",
+    )
+    parser.set_defaults(stage_zero_eval=True)
+    parser.add_argument(
+        "--stage0-general-eval",
+        dest="stage_zero_general_eval",
+        action="store_true",
+        help="Also run the general (GP/IP) benchmarks on the base model at stage 0. "
+             "Off by default: stage 0 exists for the AP/FP task baseline.",
+    )
     parser.add_argument(
         "--split-seed",
         type=int,
@@ -917,6 +1057,15 @@ def main() -> None:
         print("Eval mode: DISABLED (--train-only)")
     else:
         print(f"Quick eval mode: {'ON (perplexity-only)' if args.quick_eval else 'OFF'}")
+    print(
+        "Stage-0 baseline (base model, no adapters, all sequence tasks): "
+        f"{'ON' if args.stage_zero_eval else 'OFF'}"
+    )
+    print(
+        "Task eval samples: "
+        + (f"{args.task_eval_samples}" if args.task_eval_samples is not None
+           else f"{args.eval_size} (= --eval-size, whole held-out split)")
+    )
     print(f"Results dir: {run_output_dir}")
 
     payload = run_sequence(
@@ -968,6 +1117,8 @@ def main() -> None:
         slice_svd_selection=args.slice_svd_selection,
         keep_all_checkpoints=args.keep_all_checkpoints,
         save_intermediate_checkpoints=args.save_checkpoints,
+        stage_zero_eval=args.stage_zero_eval,
+        stage_zero_general_eval=args.stage_zero_general_eval,
         general_eval_strategy=args.general_eval_strategy,
         seen_eval_strategy=args.seen_eval_strategy,
         train_only=args.train_only,

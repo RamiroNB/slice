@@ -47,6 +47,7 @@ def build_results_matrix(
 def compute_cl_metrics(
     stage_records: List[Dict[str, Any]],
     task_order: List[str],
+    stage_zero_record: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Compute AP, FP, Forget, GP, IP from staged continual-learning results.
 
@@ -55,6 +56,11 @@ def compute_cl_metrics(
         - FP is the mean final-stage scores over all trained tasks.
         - Forget is AP - FP.
         - GP/IP are final-stage general means from lm-eval.
+        - ``stage_zero_record`` is the untrained base model scored on every task
+          in the sequence. It is reported as ZS (and per-task under
+          ``zero_shot_scores``) but deliberately kept out of ``stage_records``
+          and ``results_matrix``: those are indexed by training stage, so a
+          stage-0 row would shift the diagonal AP reads off by one.
     """
     if not stage_records:
         raise ValueError("stage_records is empty.")
@@ -98,7 +104,7 @@ def compute_cl_metrics(
         "IP": final_general.get("ip_mean"),
     }
 
-    return {
+    out: Dict[str, Any] = {
         "metrics": metrics,
         "task_order": task_order,
         "results_matrix": matrix,
@@ -106,3 +112,23 @@ def compute_cl_metrics(
         "final_scores": final_stage_scores,
         "per_task_forgetting": per_task_forgetting,
     }
+
+    if stage_zero_record is not None:
+        zero_seen = _stage_seen_scores(stage_zero_record)
+        zero_scores = {task: zero_seen.get(task) for task in task_order}
+        zero_values = [v for v in zero_scores.values() if v is not None]
+        zero_general = stage_zero_record.get("general") or {}
+        metrics["ZS"] = _mean(zero_values)
+        metrics["ZS_GP"] = zero_general.get("gp_mean")
+        metrics["ZS_IP"] = zero_general.get("ip_mean")
+        out["zero_shot_scores"] = zero_scores
+        out["gain_over_zero_shot"] = {
+            task: (
+                (final_stage_scores.get(task) - zero_scores[task])
+                if (final_stage_scores.get(task) is not None and zero_scores[task] is not None)
+                else None
+            )
+            for task in task_order
+        }
+
+    return out
