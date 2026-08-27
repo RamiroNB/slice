@@ -485,6 +485,10 @@ def build_matrix_df(runs: list[dict]) -> pd.DataFrame:
     for r in runs:
         for entry in r["matrix"]:
             stage   = entry["stage"]
+            # stage 0 is the untrained base-model baseline (empty trained_task);
+            # it would show up as a blank row in the results-matrix heatmap.
+            if stage == 0:
+                continue
             trained = entry["trained_task"]
             for task, score in entry["scores"].items():
                 rows.append({

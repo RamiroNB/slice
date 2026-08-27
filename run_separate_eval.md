@@ -57,10 +57,15 @@ an existing stage manifest — same base model, same `eval_size`,
 same questions as the trained stages. Pass `--no-stage0` to skip it, or
 `--stage0-general-eval` to also run GP/IP on the base model.
 
-Stage 0 never enters `results_matrix.json` or the stage-indexed metric
-computation (it would shift the AP diagonal by one). It surfaces as `ZS` in
-`metrics.json` and as `zero_shot_scores` / `gain_over_zero_shot` in the run
-summary.
+Stage 0 never enters `stage_records` or the AP/FP math — those are over
+training stages only. It surfaces as `ZS` in `metrics.json`, as
+`zero_shot_scores` / `gain_over_zero_shot` in the run summary, and as a row in
+`results_matrix.json` with `"stage": 0` and an empty `trained_task`.
+
+That row is **appended last**, not prepended: analysis code here reads the
+matrix positionally (`matrix[st]` for stage `st+1`, `matrix[4]` for the final
+stage), so a leading row would shift those reads by one without erroring.
+Filter on `stage == 0` to pick out the baseline.
 
 ### Scored (prompt, response) pairs
 

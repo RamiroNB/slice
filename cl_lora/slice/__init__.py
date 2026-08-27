@@ -1,6 +1,6 @@
 from .apply import apply_slice_inits
 from .compute import compute_loram_inits, compute_slice_inits, load_or_compute_slice_inits
-from .config import SliceInitConfig
+from .config import SliceInitConfig, assert_slice_flags_require_slice_init
 
 from ..repro import set_global_seed
 
@@ -47,6 +47,7 @@ def initialize_lora_with_slice(
 __all__ = [
     "SliceInitConfig",
     "apply_slice_inits",
+    "assert_slice_flags_require_slice_init",
     "compute_loram_inits",
     "compute_slice_inits",
     "initialize_lora_with_slice",

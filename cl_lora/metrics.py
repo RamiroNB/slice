@@ -28,8 +28,19 @@ def _stage_seen_scores(stage_record: Dict[str, Any]) -> Dict[str, float | None]:
 def build_results_matrix(
     stage_records: List[Dict[str, Any]],
     task_order: List[str],
+    stage_zero_record: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
-    """Build a stage-by-task score matrix for trained tasks."""
+    """Build a stage-by-task score matrix for trained tasks.
+
+    The stage-0 baseline (untrained base model, no adapters) is **appended**
+    last, not prepended, and carries ``"stage": 0`` with an empty
+    ``trained_task``. Analysis code across this repo indexes this list
+    positionally — ``matrix[st]`` for stage ``st+1``, ``matrix[4]`` for the
+    final stage of a 5-task sequence — so putting the baseline first would
+    silently shift every one of those reads by one row. Appending keeps
+    ``matrix[i] == training stage i+1`` intact; read the baseline by filtering
+    on ``stage == 0``, never by position.
+    """
     matrix: List[Dict[str, Any]] = []
     for stage_idx, stage in enumerate(stage_records, start=1):
         seen_scores = _stage_seen_scores(stage)
@@ -41,6 +52,20 @@ def build_results_matrix(
                 "scores": row_scores,
             }
         )
+
+    if stage_zero_record is not None:
+        zero_scores = _stage_seen_scores(stage_zero_record)
+        matrix.append(
+            {
+                "stage": 0,
+                # Empty on purpose: consumers build the task axis from
+                # trained_task, so a label here would invent a sixth task.
+                "trained_task": "",
+                "baseline": "base_model_no_adapters",
+                "scores": {task: zero_scores.get(task) for task in task_order},
+            }
+        )
+
     return matrix
 
 
@@ -67,19 +92,26 @@ def compute_cl_metrics(
     if not task_order:
         raise ValueError("task_order is empty.")
 
-    matrix = build_results_matrix(stage_records=stage_records, task_order=task_order)
+    matrix = build_results_matrix(
+        stage_records=stage_records,
+        task_order=task_order,
+        stage_zero_record=stage_zero_record,
+    )
+    # AP/FP are defined over training stages only. The stage-0 row lives in the
+    # same list, so select by stage rather than by position/`[-1]`.
+    train_rows = [row for row in matrix if row.get("stage", 0) > 0]
 
     diagonal_scores: Dict[str, float | None] = {}
     diag_values: List[float] = []
     for idx, task_name in enumerate(task_order):
-        if idx >= len(matrix):
+        if idx >= len(train_rows):
             break
-        score = matrix[idx]["scores"].get(task_name)
+        score = train_rows[idx]["scores"].get(task_name)
         diagonal_scores[task_name] = score
         if score is not None:
             diag_values.append(score)
 
-    final_stage_scores = matrix[-1]["scores"]
+    final_stage_scores = train_rows[-1]["scores"]
     final_values = [v for v in final_stage_scores.values() if v is not None]
 
     per_task_forgetting = {}

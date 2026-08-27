@@ -1,7 +1,35 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from typing import Optional
+
+
+def assert_slice_flags_require_slice_init(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    """Reject slice-init settings passed without --slice-init.
+
+    Training only builds an init when `slice_enabled` is set, so
+    `--slice-init-method lora_ga` on its own trains a plain vanilla-init run
+    (A=kaiming, B=0) under a lora_ga run name, with nothing in the logs or the
+    results folder saying so.
+    """
+    if getattr(args, "slice_init", False):
+        return
+    explicit = sorted(
+        dest for dest in vars(args)
+        if dest.startswith("slice_")
+        and dest != "slice_init"
+        and getattr(args, dest) != parser.get_default(dest)
+    )
+    if explicit:
+        flags = ", ".join("--" + dest.replace("_", "-") for dest in explicit)
+        parser.error(
+            f"{flags} set without --slice-init: the run would train from PEFT's "
+            "vanilla init (B=0) and ignore every slice setting. Pass --slice-init, "
+            "or drop these flags if a vanilla-init run is what you want."
+        )
 
 
 @dataclass

@@ -23,6 +23,7 @@ try:
     from .metrics import compute_cl_metrics
     from .repro import preserve_rng_state, set_global_seed
     from .task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
+    from .slice import assert_slice_flags_require_slice_init
     from .train import (
         HF_TOKEN, MODEL_NAME,
         build_tokenizer, load_base_model,
@@ -35,6 +36,7 @@ except ImportError:
     from metrics import compute_cl_metrics
     from repro import preserve_rng_state, set_global_seed
     from task_sequences import CORE_EVAL_TASKS, GENERAL_EVAL_TASKS, get_sequence
+    from slice import assert_slice_flags_require_slice_init  # type: ignore[no-redef]
     from train import (  # type: ignore[no-redef]
         HF_TOKEN, MODEL_NAME,
         build_tokenizer, load_base_model,
@@ -1006,6 +1008,7 @@ def main() -> None:
              "stages and all tasks at the final stage.")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
+    assert_slice_flags_require_slice_init(parser, args)
 
     set_global_seed(args.seed)
 

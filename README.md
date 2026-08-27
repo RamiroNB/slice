@@ -198,10 +198,16 @@ the sequence**, with the same AP/FP protocol (same held-out questions, same
 
 It lands in `results/<seq>/<run>/stages/stage_00_base/` (its manifest carries
 `"adapter_paths": []`) and is reported as `ZS` in `metrics.json`, alongside
-`zero_shot_scores` and `gain_over_zero_shot` in the run summary. Stage 0 is
-deliberately kept **out of** `results_matrix.json` and `stage_records`: those
-are indexed by training stage, and a stage-0 row would shift the AP diagonal.
-AP, FP and Forget are unchanged by it.
+`zero_shot_scores` and `gain_over_zero_shot` in the run summary. AP, FP and
+Forget are unchanged by it — they are computed over training stages only.
+
+In `results_matrix.json` the baseline appears as a row with `"stage": 0`,
+`"trained_task": ""` and `"baseline": "base_model_no_adapters"`, **appended
+last** rather than first. Analysis code across this repo indexes that list
+positionally (`matrix[st]` for stage `st+1`, `matrix[4]` for the final stage of
+a 5-task sequence), so a leading baseline row would silently shift every one of
+those reads. Select it by `stage == 0`, never by position, and keep it out of
+stage-indexed loops. Stage 0 stays out of `stage_records` entirely.
 
 Benchmarks (GP/IP) are skipped at stage 0 unless `--stage0-general-eval` is
 passed; with it, the base model's scores are reported as `ZS_GP` / `ZS_IP`.
