@@ -5,6 +5,18 @@ import os
 import random
 
 
+def strict_determinism_enabled() -> bool:
+    """True when CL_LORA_DETERMINISTIC=1 is set (the --deterministic run mode).
+
+    Strict mode makes nondeterministic CUDA kernels a hard error instead of a
+    warning, so a run either is bit-reproducible or refuses to start. It also
+    switches the model to a deterministic attention implementation (see
+    train.load_base_model) and enables the Trainer's full_determinism, which
+    additionally disables TF32.
+    """
+    return os.environ.get("CL_LORA_DETERMINISTIC", "").strip() == "1"
+
+
 def set_global_seed(
     seed: int,
     *,
@@ -31,6 +43,13 @@ def set_global_seed(
     if not isinstance(seed, int):
         raise TypeError(f"seed must be int, got {type(seed).__name__}")
 
+    # Strict mode: a nondeterministic kernel must abort the run, not warn.
+    # warn_only=True let flash-attention-2's nondeterministic backward (and any
+    # other atomicAdd-based kernel) run silently, which is exactly how two runs
+    # from a bit-identical init were diverging by whole points on task scores.
+    if strict_determinism_enabled():
+        warn_only = False
+
     if set_env:
         os.environ["PYTHONHASHSEED"] = str(seed)
         # Improves determinism for some CUDA BLAS kernels when set early.
@@ -51,10 +70,16 @@ def set_global_seed(
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
-            # TF32 gives ~3x faster matmuls on Ampere+ GPUs with
-            # negligible precision loss (intermediate products only).
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+            if strict_determinism_enabled():
+                # Match Trainer full_determinism (which also turns TF32 off) so
+                # the init probe computes with the same kernels training uses.
+                torch.backends.cuda.matmul.allow_tf32 = False
+                torch.backends.cudnn.allow_tf32 = False
+            else:
+                # TF32 gives ~3x faster matmuls on Ampere+ GPUs with
+                # negligible precision loss (intermediate products only).
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
 
         if deterministic:
             try:
