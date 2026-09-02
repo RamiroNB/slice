@@ -268,6 +268,10 @@ def run_sequence(
     slice_nullspace_rank: int = 8,
     slice_nullspace_sv_threshold: float = 0.0,
     slice_svd_selection: str = "lora_ga",
+    slice_dot_significance_k: float = 0.0,
+    slice_gamma_rel_cap: float | None = None,
+    num_train_epochs: float = 3.0,
+    logging_steps: int = 50,
     keep_all_checkpoints: bool = False,
     save_intermediate_checkpoints: bool = False,
     stage_zero_eval: bool = True,
@@ -325,6 +329,11 @@ def run_sequence(
         "slice_retain_batch_size_set": slice_retain_batch_size_set,
         "slice_single_retain_task_mode": slice_single_retain_task_mode,
         "slice_init_method": slice_init_method,
+        "slice_dot_significance_k": float(slice_dot_significance_k),
+        "slice_gamma_rel_cap": slice_gamma_rel_cap,
+        "num_train_epochs": float(num_train_epochs),
+        "logging_steps": int(logging_steps),
+        "deterministic": os.environ.get("CL_LORA_DETERMINISTIC", "").strip() == "1",
         "keep_all_checkpoints": keep_all_checkpoints,
         "save_intermediate_checkpoints": save_intermediate_checkpoints,
         "stage_zero_eval": bool(stage_zero_eval),
@@ -609,6 +618,10 @@ def run_sequence(
             slice_nullspace_rank=slice_nullspace_rank,
             slice_nullspace_sv_threshold=slice_nullspace_sv_threshold,
             slice_svd_selection=slice_svd_selection,
+            slice_dot_significance_k=slice_dot_significance_k,
+            slice_gamma_rel_cap=slice_gamma_rel_cap,
+            num_train_epochs=num_train_epochs,
+            logging_steps=logging_steps,
             completion_only_loss=completion_only_loss,
             max_seq_length=max_seq_length,
             cl_method=cl_method,
@@ -800,6 +813,24 @@ def main() -> None:
     parser.add_argument("--eval-size", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42, help="Global RNG seed for reproducibility.")
     parser.add_argument(
+        "--num-train-epochs", type=float, default=3.0,
+        help="SFT epochs per stage. Fewer epochs overfit the task less, which keeps "
+             "retain-task gradients (and thus the conflict probe's signal) from "
+             "collapsing to noise on later stages.",
+    )
+    parser.add_argument(
+        "--logging-steps", type=int, default=50,
+        help="Trainer logging interval. Each logged step records loss, grad_norm and "
+             "lr into the stage report's log_history.",
+    )
+    parser.add_argument(
+        "--deterministic", action="store_true",
+        help="Bit-reproducible mode: eager attention (flash-attention-2's backward is "
+             "nondeterministic), hard errors on nondeterministic CUDA kernels, Trainer "
+             "full_determinism, TF32 off. Slower; makes same-config runs bit-identical "
+             "so method deltas cannot be training noise.",
+    )
+    parser.add_argument(
         "--task-eval-samples",
         type=int,
         default=None,
@@ -949,6 +980,14 @@ def main() -> None:
         help="Rank for null-space projection.")
     parser.add_argument("--slice-nullspace-sv-threshold", type=float, default=0.0,
         help="Relative singular-value cutoff for null-space projection.")
+    parser.add_argument("--slice-dot-significance-k", type=float, default=0.0,
+        help="Significance gate on the global conflict dot (pcgrad global mode): fire "
+             "only when dot < 0 and |dot| > k * SE, with SE estimated from per-retain-"
+             "batch dot samples. 0 = legacy sign-of-point-estimate gate.")
+    parser.add_argument("--slice-gamma-rel-cap", type=float, default=None,
+        help="Cap the projection strength so |gamma|*||g_retain|| <= cap*||g_current||. "
+             "Prevents the tiny-retain-norm blowup (gamma = dot/||g_r||^2). "
+             "None = uncapped.")
     parser.add_argument("--slice-svd-selection",
         choices=["lora_ga", "top_r_no_sigma"], default="lora_ga",
         help="SVD selection rule for LoRA A/B. 'top_r_no_sigma' uses the "
@@ -1009,6 +1048,13 @@ def main() -> None:
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     args = parser.parse_args()
     assert_slice_flags_require_slice_init(parser, args)
+
+    # Must be set before set_global_seed and before any CUDA work: repro.py and
+    # train.load_base_model read this env to pick strict determinism + eager
+    # attention. (Exporting CL_LORA_DETERMINISTIC=1 in the launcher is
+    # equivalent and also covers CUBLAS_WORKSPACE_CONFIG timing.)
+    if args.deterministic:
+        os.environ["CL_LORA_DETERMINISTIC"] = "1"
 
     set_global_seed(args.seed)
 
@@ -1118,6 +1164,10 @@ def main() -> None:
         slice_nullspace_rank=args.slice_nullspace_rank,
         slice_nullspace_sv_threshold=args.slice_nullspace_sv_threshold,
         slice_svd_selection=args.slice_svd_selection,
+        slice_dot_significance_k=args.slice_dot_significance_k,
+        slice_gamma_rel_cap=args.slice_gamma_rel_cap,
+        num_train_epochs=args.num_train_epochs,
+        logging_steps=args.logging_steps,
         keep_all_checkpoints=args.keep_all_checkpoints,
         save_intermediate_checkpoints=args.save_checkpoints,
         stage_zero_eval=args.stage_zero_eval,
