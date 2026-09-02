@@ -116,7 +116,9 @@ def run_eval_from_manifest(
     resolved_skip_general: bool = bool(_get("skip_general_eval", skip_general_eval, False))
     resolved_quick: bool = bool(_get("quick_eval", quick_eval, False))
     resolved_eval_size: int = int(_get("eval_size", eval_size, 200))
-    resolved_samples: int = int(_get("task_eval_samples", task_eval_samples, 64))
+    # Unset (CLI and manifest) means score the whole held-out split.
+    _samples = _get("task_eval_samples", task_eval_samples, None)
+    resolved_samples: int = int(_samples) if _samples is not None else resolved_eval_size
     resolved_max_new: int = int(_get("task_eval_max_new_tokens", task_eval_max_new_tokens, 64))
     # Follow the budget this run was trained with, so eval truncates prompts the
     # same way. Pre-fix manifests have no such key and fall back to the default.
@@ -163,7 +165,10 @@ def run_eval_from_manifest(
         print(f"Loading base model from: {abs_base}")
         tokenizer = build_tokenizer(model_name=abs_base, hf_token=HF_TOKEN)
 
-        print(f"Merging {len(resolved_adapter_paths)} adapter(s): {resolved_adapter_paths}")
+        if resolved_adapter_paths:
+            print(f"Merging {len(resolved_adapter_paths)} adapter(s): {resolved_adapter_paths}")
+        else:
+            print("No adapters in manifest: evaluating the base model as-is (stage 0).")
         model = load_model_with_adapters(abs_base, resolved_adapter_paths)
     else:
         # Legacy format: single merged-model checkpoint.
@@ -234,9 +239,13 @@ def run_eval_from_manifest(
     )
 
     train_report: Dict[str, Any] = {}
-    train_report_path = Path(manifest.get("train_output_dir", "")) / "training_report.json"
-    if train_report_path.exists():
-        train_report = _read_json(train_report_path)
+    # Stage 0 has no training output dir; an empty value would resolve to a
+    # relative "training_report.json" in the cwd.
+    train_output_dir = str(manifest.get("train_output_dir") or "")
+    if train_output_dir:
+        train_report_path = Path(train_output_dir) / "training_report.json"
+        if train_report_path.exists():
+            train_report = _read_json(train_report_path)
 
     stage_record = {
         "stage": stage,
@@ -251,6 +260,84 @@ def run_eval_from_manifest(
     print(f"Saved stage_record.json: {out_path}")
 
     return stage_record
+
+
+STAGE_ZERO_DIR_NAME = "stage_00_base"
+
+
+def ensure_stage_zero_manifest(run_dir: Path, *, general_eval: bool = False) -> Path | None:
+    """Make sure the run has a stage-0 (base model) eval manifest.
+
+    Stage 0 is the pre-trained model with no adapters at all, scored on every
+    task in the sequence — the baseline the AP/FP numbers are read against.
+    Runs trained before stage 0 existed have no such manifest, so it is derived
+    here from any training stage's manifest (which records the base model path
+    and the eval settings that stage was scored under).
+
+    Returns the stage-0 directory, or None if no source manifest was found.
+    """
+    stages_dir = run_dir / "stages"
+    stage_zero_dir = stages_dir / STAGE_ZERO_DIR_NAME
+    if (stage_zero_dir / "eval_manifest.json").exists():
+        return stage_zero_dir
+
+    source: Dict[str, Any] | None = None
+    source_name = ""
+    for sd in sorted(stages_dir.glob("stage_*")):
+        if sd.name == STAGE_ZERO_DIR_NAME:
+            continue
+        mf = sd / "eval_manifest.json"
+        if mf.exists():
+            source = _read_json(mf)
+            source_name = sd.name
+            break
+
+    if source is None:
+        print(f"Cannot derive a stage-0 manifest for {run_dir}: no stage eval_manifest.json found.")
+        return None
+
+    sequence_name = source.get("sequence")
+    if not sequence_name:
+        print(f"Cannot derive a stage-0 manifest for {run_dir}: source manifest has no sequence.")
+        return None
+
+    task_names = [t.name for t in get_sequence(sequence_name).tasks]
+    base_model_path = source.get("base_model_path", "")
+    if not base_model_path or not Path(base_model_path).is_dir():
+        derived_base = run_dir / "checkpoints" / "base_model"
+        if derived_base.is_dir():
+            base_model_path = str(derived_base.resolve())
+
+    manifest = {
+        "stage": 0,
+        "trained_task": "",
+        "sequence": sequence_name,
+        "seen_tasks": task_names,
+        "eval_seen_tasks": task_names,
+        "base_model_path": str(base_model_path),
+        # Empty on purpose: stage 0 is the base model by itself.
+        "adapter_paths": [],
+        "general_eval_keys": source.get("general_eval_keys", []),
+        "skip_general_eval": not general_eval,
+        "quick_eval": bool(source.get("quick_eval", False)),
+        "eval_size": source.get("eval_size"),
+        "task_eval_samples": source.get("task_eval_samples"),
+        "task_eval_max_new_tokens": source.get("task_eval_max_new_tokens"),
+        "max_seq_length": source.get("max_seq_length"),
+        "seed": source.get("seed"),
+        # Same partition the checkpoints were trained under, so stage 0 and the
+        # trained stages are scored on identical questions.
+        "split_seed": source.get("split_seed"),
+        "train_output_dir": "",
+        "cl_method": source.get("cl_method"),
+        "derived_from": source_name,
+    }
+    manifest = {k: v for k, v in manifest.items() if v is not None or k in ("split_seed",)}
+
+    stage_zero_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(stage_zero_dir / "eval_manifest.json", manifest)
+    print(f"Derived stage-0 eval manifest: {stage_zero_dir / 'eval_manifest.json'}")
+    return stage_zero_dir
 
 
 def recompute_run_summary(run_dir: Path) -> None:
@@ -269,10 +356,16 @@ def recompute_run_summary(run_dir: Path) -> None:
     stage_dirs = sorted(stages_dir.glob("stage_*"))
     stage_records = []
     task_order = []
+    stage_zero_record = None
     for sd in stage_dirs:
         sr_path = sd / "stage_record.json"
         if sr_path.exists():
             sr = _read_json(sr_path)
+            # Stage 0 is the base model, not a training stage: it must stay out
+            # of the stage-indexed matrix or the AP diagonal shifts by one.
+            if int(sr.get("stage", -1)) == 0:
+                stage_zero_record = sr
+                continue
             stage_records.append(sr)
             task_order.append(sr.get("trained_task", ""))
 
@@ -280,7 +373,11 @@ def recompute_run_summary(run_dir: Path) -> None:
         print("No stage_record.json files found; skipping summary.")
         return
 
-    summary = compute_cl_metrics(stage_records=stage_records, task_order=task_order)
+    summary = compute_cl_metrics(
+        stage_records=stage_records,
+        task_order=task_order,
+        stage_zero_record=stage_zero_record,
+    )
     _write_json(run_dir / "results_matrix.json", summary["results_matrix"])
     _write_json(run_dir / "metrics.json", summary["metrics"])
 
@@ -288,6 +385,7 @@ def recompute_run_summary(run_dir: Path) -> None:
     if summary_path.exists():
         payload = _read_json(summary_path)
         payload["stage_records"] = stage_records
+        payload["stage_zero"] = stage_zero_record
         payload["summary"] = summary
         payload.setdefault("task_order", task_order)
         _write_json(summary_path, payload)
@@ -361,6 +459,15 @@ def main() -> None:
                             "already has task scores/benchmarks (ignores skip logic).")
     run_p.add_argument("--general-eval-all-stages", action="store_true", default=False,
                        help="Run benchmark eval (GP/IP) at every stage, not just the final one.")
+    run_p.add_argument("--no-stage0", dest="stage_zero", action="store_false",
+                       help="Skip the stage-0 baseline. By default the base model with no "
+                            "adapters is scored on every task in the sequence; if the run has "
+                            "no stages/stage_00_base/ the manifest is derived from an existing "
+                            "stage manifest, so runs trained before stage 0 existed get it too.")
+    run_p.set_defaults(stage_zero=True)
+    run_p.add_argument("--stage0-general-eval", dest="stage_zero_general_eval",
+                       action="store_true", default=False,
+                       help="Also run GP/IP benchmarks on the base model at stage 0.")
     run_p.add_argument("--quick-eval", action="store_true", default=None)
     run_p.add_argument("--eval-size", type=int, default=None)
     run_p.add_argument("--task-eval-samples", type=int, default=None)
@@ -398,8 +505,16 @@ def main() -> None:
     if args.mode == "stage":
         skip_general = True if args.skip_general_eval else None
         quick = True if args.quick_eval else None
+        stage_dir = Path(args.stage_dir)
+        # `--stage-dir <run>/stages/stage_00_base` on a run trained before
+        # stage 0 existed: derive the manifest from a training stage instead
+        # of failing for want of one.
+        if stage_dir.name == STAGE_ZERO_DIR_NAME and not (stage_dir / "eval_manifest.json").exists():
+            # Task baseline only, as everywhere else for stage 0; use
+            # `run --stage0-general-eval` to add GP/IP on the base model.
+            ensure_stage_zero_manifest(stage_dir.parent.parent, general_eval=False)
         run_eval_from_manifest(
-            stage_dir=Path(args.stage_dir),
+            stage_dir=stage_dir,
             model_path=args.model_path,
             sequence=args.sequence,
             seen_tasks=args.seen_tasks,
@@ -424,6 +539,12 @@ def main() -> None:
         stage_dirs = sorted(stages_dir.glob("stage_*"))
         if not stage_dirs:
             raise FileNotFoundError(f"No stage_* directories found in {stages_dir}")
+
+        if args.stage_zero:
+            ensure_stage_zero_manifest(run_dir, general_eval=args.stage_zero_general_eval)
+            stage_dirs = sorted(stages_dir.glob("stage_*"))
+        else:
+            stage_dirs = [sd for sd in stage_dirs if sd.name != STAGE_ZERO_DIR_NAME]
 
         skip_general = True if args.skip_general_eval else None
         quick = True if args.quick_eval else None
@@ -466,6 +587,9 @@ def main() -> None:
             skip_general_this_stage = skip_general
             if final_only and not is_final:
                 skip_general_this_stage = True
+            if sd.name == STAGE_ZERO_DIR_NAME:
+                # Stage 0 follows its own flag, not the final-stage-only rule.
+                skip_general_this_stage = False if args.stage_zero_general_eval else True
             print(f"\n=== Evaluating {sd.name}{' (benchmarks skipped)' if skip_general_this_stage else ''} ===")
             run_eval_from_manifest(
                 stage_dir=sd,

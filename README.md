@@ -177,6 +177,8 @@ all `C(46, 5) = 1,370,754` length-5 subsets by mean pairwise gradient cosine.
 | Per-device train batch size | 16 | [cl_lora/train.py:344](cl_lora/train.py#L344) |
 | SLICE accumulation steps `S_cur`, `S_prev` | 8 | `--slice-max-steps` |
 | Random seed | 42 | `--seed` |
+| Questions scored per seen task | `--eval-size` (whole held-out split) | `--task-eval-samples` |
+| Stage-0 (untrained) baseline | on | `--no-stage0-eval` to skip |
 
 ## Evaluation
 
@@ -185,6 +187,55 @@ seen-task evaluation (exact-match / ROUGE-L on the held-out splits) and, by
 default, a fixed set of general-capability benchmarks (HellaSwag,
 CommonsenseQA, BBH-ObjectCounting, Alpaca) for **GP** (zero-shot) and **IP**
 (few-shot, n=5; n=3 for BBH).
+
+### Stage 0 — the untrained baseline
+
+Before stage 1 trains anything, the run scores the **pristine pre-trained
+model** — no adapter from any stage is loaded or merged — on **every task in
+the sequence**, with the same AP/FP protocol (same held-out questions, same
+`--split-seed`, same generation budget). This is on by default; pass
+`--no-stage0-eval` to skip it.
+
+It lands in `results/<seq>/<run>/stages/stage_00_base/` (its manifest carries
+`"adapter_paths": []`) and is reported as `ZS` in `metrics.json`, alongside
+`zero_shot_scores` and `gain_over_zero_shot` in the run summary. AP, FP and
+Forget are unchanged by it — they are computed over training stages only.
+
+In `results_matrix.json` the baseline appears as a row with `"stage": 0`,
+`"trained_task": ""` and `"baseline": "base_model_no_adapters"`, **appended
+last** rather than first. Analysis code across this repo indexes that list
+positionally (`matrix[st]` for stage `st+1`, `matrix[4]` for the final stage of
+a 5-task sequence), so a leading baseline row would silently shift every one of
+those reads. Select it by `stage == 0`, never by position, and keep it out of
+stage-indexed loops. Stage 0 stays out of `stage_records` entirely.
+
+Benchmarks (GP/IP) are skipped at stage 0 unless `--stage0-general-eval` is
+passed; with it, the base model's scores are reported as `ZS_GP` / `ZS_IP`.
+
+Runs trained before stage 0 existed can still get it — `eval_standalone run`
+derives the stage-0 manifest from an existing stage manifest (same base model,
+same eval settings), so it defaults to evaluating stage 0 too:
+
+```eval-stage0
+CUDA_VISIBLE_DEVICES=0 python -m cl_lora.eval_standalone run \
+  --run-dir results/NI-Seq-G2/slice_g2      # add --no-stage0 to skip
+```
+
+### Scored (prompt, response) pairs
+
+Every seen-task generation eval writes each scored pair to
+`<stage_dir>/predictions/<task>.jsonl`, one JSON object per question:
+
+```json
+{"task": "task363_...", "index": 0, "prompt": "...", "response": "...",
+ "reference": "...", "exact_match": 1.0, "rouge_l": 1.0,
+ "primary_metric": "exact_match", "score": 1.0}
+```
+
+The pairs stay in this side-car file rather than inside `stage_record.json`,
+which the metric and analysis pipeline reads wholesale. `stage_record.json`
+records the path under each task's `predictions_log`. `--quick-eval`
+(perplexity-only) generates nothing and so writes no pairs.
 
 ### Evaluating from saved checkpoints
 
@@ -222,7 +273,8 @@ After evaluation, the orchestrator writes:
 
 - `results/<seq>/<run>/results_matrix.json` — the lower-triangular `R[i, j]`
   matrix (score on task `j` after training through task `i`)
-- `results/<seq>/<run>/metrics.json` — AP, FP, Forget, GP, IP
+- `results/<seq>/<run>/metrics.json` — AP, FP, Forget, GP, IP, plus `ZS`
+  (and `ZS_GP` / `ZS_IP`) when the stage-0 baseline was evaluated
 
 To recompute aggregate metrics from raw stage records (e.g. after re-running
 just GP/IP):

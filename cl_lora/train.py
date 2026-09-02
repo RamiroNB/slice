@@ -27,14 +27,22 @@ try:
     from .load_dataset import configure_prompt_tokenizer, load_training_dataset
     from .lora_config import build_lora_config
     from .repro import set_global_seed
-    from .slice import SliceInitConfig, initialize_lora_with_slice
+    from .slice import (
+        SliceInitConfig,
+        assert_slice_flags_require_slice_init,
+        initialize_lora_with_slice,
+    )
 except ImportError:
     from cl_methods import CLMethod, VanillaCLMethod  # type: ignore[no-redef]
     from data import build_collator, tokenize_dataset  # type: ignore[no-redef]
     from load_dataset import configure_prompt_tokenizer, load_training_dataset  # type: ignore[no-redef]
     from lora_config import build_lora_config
     from repro import set_global_seed
-    from slice import SliceInitConfig, initialize_lora_with_slice  # type: ignore[no-redef]
+    from slice import (  # type: ignore[no-redef]
+        SliceInitConfig,
+        assert_slice_flags_require_slice_init,
+        initialize_lora_with_slice,
+    )
 
 
 def _patch_accelerate_unwrap_model_compat() -> None:
@@ -178,14 +186,29 @@ def _apply_init_absorption(peft_model, init_correction: dict) -> None:
     named_modules = dict(peft_model.named_modules())
     for module_name, ab in init_correction.items():
         module = named_modules.get(module_name)
+        # A saved init_correction records modules that WERE absorbed during
+        # training. Skipping one here silently reconstructs that layer without its
+        # absorption, i.e. evaluates weights the run never had -- so treat any
+        # mismatch as the bug it is instead of degrading quietly.
         if module is None or not isinstance(module, LoraLinear):
-            continue
+            raise RuntimeError(
+                f"init_correction names {module_name}, which is not a LoRA module on "
+                f"the reconstructed model (got {type(module).__name__}). Its slice-init "
+                "absorption cannot be replayed, so the evaluated weights would differ "
+                "from the trained ones."
+            )
         if not hasattr(module, "get_base_layer"):
-            continue
+            raise RuntimeError(
+                f"LoRA module {module_name} has no get_base_layer(); cannot replay the "
+                "slice-init absorption."
+            )
         base_layer = module.get_base_layer()
         base_weight = getattr(base_layer, "weight", None)
         if not isinstance(base_weight, torch.nn.Parameter):
-            continue
+            raise RuntimeError(
+                f"base_layer.weight is not a Parameter for {module_name} "
+                f"(got {type(base_weight)}); cannot replay the slice-init absorption."
+            )
 
         scaling = float(module.scaling["default"])
         B = ab["B"].to(device=base_weight.device, dtype=torch.float32)
@@ -489,6 +512,36 @@ def train_on_task(
         )
 
         from peft.tuners.lora import Linear as LoraLinear
+
+        # Read back what the init actually left on the model. apply_slice_inits
+        # already raises on every path that would leave a module vanilla; this
+        # re-derives it from the live model so a wrapper that bypasses that check
+        # (or a future CL hook that resets a module) still cannot produce a
+        # silently-vanilla run, and stores the counts in the stage report so a run
+        # stays auditable once its logs and checkpoints are gone.
+        n_lora_modules = 0
+        n_vanilla = 0
+        for _name, _mod in lora_model.named_modules():
+            if not isinstance(_mod, LoraLinear) or active_adapter not in getattr(_mod, "lora_A", {}):
+                continue
+            n_lora_modules += 1
+            if not bool(_mod.lora_B[active_adapter].weight.any()):
+                n_vanilla += 1
+        if n_vanilla or int(num_written) != n_lora_modules:
+            raise RuntimeError(
+                f"Slice init did not cover the model: wrote {int(num_written)} of "
+                f"{n_lora_modules} LoRA modules and {n_vanilla} are still at the "
+                f"vanilla B=0 init (init_method={slice_init_method})."
+            )
+        slice_init_audit = {
+            "init_method": str(slice_init_method),
+            "svd_selection": str(slice_svd_selection),
+            "adapter": str(active_adapter),
+            "num_modules_written": int(num_written),
+            "num_lora_modules": int(n_lora_modules),
+            "num_modules_vanilla_b_zero": int(n_vanilla),
+        }
+
         lora_init_correction = {
             name: {
                 "A": mod.lora_A[active_adapter].weight.detach().cpu().clone(),
@@ -499,6 +552,7 @@ def train_on_task(
         }
     else:
         lora_init_correction = {}
+        slice_init_audit = {"init_method": "vanilla", "num_modules_written": 0}
 
     if sd_lora_mode:
         # SD-LoRA stores each task's init inside its frozen block and never
@@ -651,6 +705,7 @@ def train_on_task(
             "use_rslora": True,
         },
         "slice_projection": slice_projection_summary,
+        "slice_init_audit": slice_init_audit,
         "output_dir": str(output_path),
         "configs": {
             "seed": int(seed),
@@ -735,6 +790,7 @@ def main() -> None:
         help="Initialization method: 'slice' (default), 'lora_ga' (SVD on current-task gradients only), "
              "or 'loram' (DST-based, no gradients).")
     args = parser.parse_args()
+    assert_slice_flags_require_slice_init(parser, args)
 
     set_global_seed(args.seed)
 

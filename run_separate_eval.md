@@ -26,14 +26,63 @@ results/<sequence>/<run-name>/
 │   └── stage_02_<task>/
 │       └── merged_model/
 ├── stages/
+│   ├── stage_00_base/             ← stage 0: base model, no adapters at all
+│   │   ├── eval_manifest.json     ← "adapter_paths": []
+│   │   ├── stage_record.json
+│   │   └── predictions/<task>.jsonl
 │   ├── stage_01_<task>/
 │   │   ├── eval_manifest.json     ← written BEFORE eval
-│   │   └── stage_record.json      ← written AFTER eval
+│   │   ├── stage_record.json      ← written AFTER eval
+│   │   └── predictions/           ← one JSONL per task: every scored pair
+│   │       └── <task>.jsonl
 │   └── stage_02_<task>/
 │       ├── eval_manifest.json
-│       └── stage_record.json
+│       ├── stage_record.json
+│       └── predictions/<task>.jsonl
 └── ...
 ```
+
+### Stage 0: the untrained baseline
+
+`stages/stage_00_base/` holds the pre-trained model scored on **every task in
+the sequence** with no adapter loaded or merged — the AP/FP baseline. Its
+manifest is identical in form to a training stage's except that
+`adapter_paths` is empty and there is no `train_output_dir`, so
+`eval_standalone` evaluates it exactly like any other stage.
+
+`eval_standalone run` evaluates stage 0 by default. For a run trained before
+stage 0 existed there is no `stage_00_base/`, so the manifest is derived from
+an existing stage manifest — same base model, same `eval_size`,
+`task_eval_samples`, `seed` and `split_seed`, so the baseline is scored on the
+same questions as the trained stages. Pass `--no-stage0` to skip it, or
+`--stage0-general-eval` to also run GP/IP on the base model.
+
+Stage 0 never enters `stage_records` or the AP/FP math — those are over
+training stages only. It surfaces as `ZS` in `metrics.json`, as
+`zero_shot_scores` / `gain_over_zero_shot` in the run summary, and as a row in
+`results_matrix.json` with `"stage": 0` and an empty `trained_task`.
+
+That row is **appended last**, not prepended: analysis code here reads the
+matrix positionally (`matrix[st]` for stage `st+1`, `matrix[4]` for the final
+stage), so a leading row would shift those reads by one without erroring.
+Filter on `stage == 0` to pick out the baseline.
+
+### Scored (prompt, response) pairs
+
+Each generation-based seen-task eval writes every scored pair to
+`<stage_dir>/predictions/<task>.jsonl`:
+
+```json
+{"task": "task363_sst2_polarity_classification", "index": 0,
+ "prompt": "...", "response": "...", "reference": "...",
+ "exact_match": 1.0, "rouge_l": 1.0, "primary_metric": "exact_match",
+ "score": 1.0}
+```
+
+They are kept out of `stage_record.json` (which the metrics pipeline reads in
+full) and referenced from it by each task's `predictions_log` path. Re-running
+a stage overwrites its JSONL. `--quick-eval` generates no text and so writes
+no pairs.
 
 ### Critical: keep all checkpoints
 
@@ -203,6 +252,17 @@ python -m cl_lora.eval_standalone stage \
 > **Note:** If only the latest stage checkpoint exists (default cleanup
 > behaviour), only that stage can be evaluated with this command.
 
+To score only the stage-0 baseline (needs just the base model, no adapters):
+
+```bash
+python -m cl_lora.eval_standalone stage \
+    --stage-dir results/NI-Seq-G1/my_train_run/stages/stage_00_base
+```
+
+If that directory has no `eval_manifest.json` — a run trained before stage 0
+existed — it is derived from one of the run's training stages first.
+Afterwards run `summary` to fold `ZS` into `metrics.json`.
+
 ---
 
 ## Workflow C — Train a single task with train.py, then eval
@@ -288,10 +348,19 @@ with `--keep-all-checkpoints`.
 | `--skip-general-eval` | false | Skip GP/IP lm-eval evaluation |
 | `--quick-eval` | false | Perplexity-only seen-task eval, skips generation |
 | `--eval-size` | from manifest | Dataset eval split size |
-| `--task-eval-samples` | from manifest | Max samples per seen task |
+| `--task-eval-samples` | from manifest, else `--eval-size` | Questions scored per seen task; unset means the whole held-out split |
 | `--task-eval-max-new-tokens` | from manifest | Generation budget per sample |
 | `--seed` | from manifest | RNG seed |
 | `--general-eval-batch-size` | 8 | Batch size for lm-eval |
+
+### run-only options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | false | Re-evaluate every stage, even ones already scored |
+| `--general-eval-all-stages` | false | Run GP/IP at every stage, not just the final one |
+| `--no-stage0` | off (stage 0 runs) | Skip the base-model baseline stage |
+| `--stage0-general-eval` | false | Also run GP/IP on the base model at stage 0 |
 
 ### stage-only options
 
@@ -345,7 +414,8 @@ Written by either the orchestrator or `eval_standalone stage/run`.
       "primary_metric": "exact_match",
       "exact_match": 0.85,
       "rouge_l": 0.88,
-      "n_samples": 64
+      "n_samples": 64,
+      "predictions_log": "/absolute/path/to/stages/stage_01_.../predictions/task363_sst2_polarity_classification.jsonl"
     }
   },
   "general": {

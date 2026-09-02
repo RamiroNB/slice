@@ -82,24 +82,30 @@ def apply_slice_inits(
     logger.debug("Slice sample init keys: %s", sample_init_keys)
     logger.debug("Slice sample LoRA modules: %s", sample_lora_names)
 
+    if not inits:
+        raise RuntimeError(
+            "slice apply received an empty init dict: every LoRA module would keep "
+            "PEFT's vanilla init (A=kaiming, B=0), producing a vanilla run under a "
+            "slice/lora_ga/loram label."
+        )
+
     num_written = 0
-    num_skipped = 0
+    unmatched: list[str] = []
+    written_modules: set[str] = set()
     for init_key, ab in inits.items():
         target_name = _resolve_target_module(init_key, lora_index)
         if target_name is None:
-            logger.debug("No PEFT LoRA module matched for init key %s; skipping", init_key)
-            num_skipped += 1
+            unmatched.append(init_key)
             continue
 
         logger.debug("slice map: init_key=%s -> peft_module=%s", init_key, target_name)
         module = named_modules[target_name]
         if adapter_name not in getattr(module, "lora_A", {}):
-            logger.warning(
-                "Adapter %r not present on LoRA module %s (have %s); skipping",
-                adapter_name, init_key, list(getattr(module, "lora_A", {}).keys()),
+            raise RuntimeError(
+                f"Adapter {adapter_name!r} not present on LoRA module {init_key} "
+                f"(have {list(getattr(module, 'lora_A', {}).keys())}). Skipping it would "
+                "leave that module at PEFT's vanilla init."
             )
-            num_skipped += 1
-            continue
         A_tgt = module.lora_A[adapter_name].weight
         B_tgt = module.lora_B[adapter_name].weight
 
@@ -113,6 +119,17 @@ def apply_slice_inits(
         with torch.no_grad():
             A_tgt.copy_(ab["A"].to(device=A_tgt.device, dtype=A_tgt.dtype))
             B_tgt.copy_(ab["B"].to(device=B_tgt.device, dtype=B_tgt.dtype))
+
+            # B=0 (with A kaiming) is exactly PEFT's vanilla init, so an all-zero
+            # factor after the copy means this layer trains as vanilla LoRA no
+            # matter what the run is labelled. Catches an all-zero gradient slice
+            # and a dtype underflow in the cast above.
+            if not bool(A_tgt.any()) or not bool(B_tgt.any()):
+                raise RuntimeError(
+                    f"Slice init wrote an all-zero factor for layer {init_key} "
+                    f"(A_nonzero={bool(A_tgt.any())}, B_nonzero={bool(B_tgt.any())}); "
+                    "B=0 is PEFT's vanilla init."
+                )
 
             if logger.isEnabledFor(logging.DEBUG):
                 a_mean, a_var = _tensor_mean_var(A_tgt)
@@ -184,6 +201,37 @@ def apply_slice_inits(
                 )
 
         num_written += 1
+        written_modules.add(target_name)
 
-    logger.info("Applied slice A/B to %d LoRA modules (skipped=%d)", num_written, num_skipped)
+    if unmatched:
+        raise RuntimeError(
+            f"Slice init could not be mapped onto a PEFT LoRA module for "
+            f"{len(unmatched)} of {len(inits)} init keys (e.g. {unmatched[:5]}); "
+            f"sample LoRA module names: {lora_names[:5]}. Those modules would keep "
+            "their vanilla init."
+        )
+
+    # Reverse direction: a LoRA module the init never reached keeps A=kaiming/B=0,
+    # i.e. trains as vanilla LoRA inside a run labelled slice/lora_ga/loram. Only
+    # reachable if the init's target-module set diverges from the LoRA config's.
+    expected = {
+        name for name in lora_names
+        if adapter_name in getattr(named_modules[name], "lora_A", {})
+    }
+    missed = sorted(expected - written_modules)
+    if missed:
+        raise RuntimeError(
+            f"{len(missed)} of {len(expected)} LoRA modules carrying adapter "
+            f"{adapter_name!r} received no slice init (e.g. {missed[:5]}); they would "
+            "train from PEFT's vanilla init."
+        )
+    if num_written == 0:
+        raise RuntimeError(
+            "Slice init wrote 0 LoRA modules; the whole run would be vanilla LoRA."
+        )
+
+    logger.info(
+        "Applied slice A/B to %d/%d LoRA modules (adapter=%s); no vanilla factors left",
+        num_written, len(expected), adapter_name,
+    )
     return num_written

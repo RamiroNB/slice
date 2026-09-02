@@ -352,6 +352,44 @@ def _model_device(model) -> torch.device:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _resolve_task_eval_samples(task_eval_samples: int | None, eval_size: int) -> int:
+    """Unset means "score the whole held-out split".
+
+    The split is the ceiling anyway (see _warn_if_samples_exceed_split), so
+    defaulting to eval_size scores every held-out question instead of silently
+    keeping a subset of them.
+    """
+    if task_eval_samples is None:
+        return int(eval_size)
+    return int(task_eval_samples)
+
+
+def _safe_file_name(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name)).strip("_") or "task"
+
+
+def _write_prediction_log(
+    output_dir: str | Path | None,
+    task_name: str,
+    records: List[Dict[str, Any]],
+) -> str | None:
+    """Write every scored (prompt, response) pair for one task as JSONL.
+
+    Kept out of stage_record.json on purpose: the pairs are orders of magnitude
+    larger than the aggregate scores, and stage_record.json is read wholesale by
+    the metric/analysis pipeline.
+    """
+    if not output_dir or not records:
+        return None
+    log_dir = Path(output_dir) / "predictions"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{_safe_file_name(task_name)}.jsonl"
+    with open(log_path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps({"task": task_name, **record}, ensure_ascii=False) + "\n")
+    return str(log_path)
+
+
 def _warn_if_samples_exceed_split(task_eval_samples: int, eval_size: int) -> None:
     """The held-out split is the hard ceiling on how many questions can be scored.
 
@@ -466,6 +504,7 @@ def _evaluate_task_with_generation(
     device = _model_device(model)
     exact_scores: list[float] = []
     rouge_scores: list[float] = []
+    examples: list[Dict[str, Any]] = []
 
     prompts = eval_dataset["prompt"]
     targets = eval_dataset["target"]
@@ -499,8 +538,22 @@ def _evaluate_task_with_generation(
                 prediction = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
                 ref = str(target).strip()
 
-                exact_scores.append(_exact_match(prediction, ref))
-                rouge_scores.append(_rouge_l_f1(prediction, ref))
+                em = _exact_match(prediction, ref)
+                rl = _rouge_l_f1(prediction, ref)
+                exact_scores.append(em)
+                rouge_scores.append(rl)
+                examples.append(
+                    {
+                        "index": start + i,
+                        "prompt": batch_prompts[i],
+                        "response": prediction,
+                        "reference": ref,
+                        "exact_match": em,
+                        "rouge_l": rl,
+                        "primary_metric": primary_metric,
+                        "score": em if primary_metric == "exact_match" else rl,
+                    }
+                )
 
     exact_match = _mean(exact_scores) or 0.0
     rouge_l = _mean(rouge_scores) or 0.0
@@ -512,6 +565,9 @@ def _evaluate_task_with_generation(
         "exact_match": exact_match,
         "rouge_l": rouge_l,
         "n_samples": len(prompts),
+        # Popped by the caller and written to a side-car JSONL; never inlined
+        # into stage_record.json.
+        "examples": examples,
     }
 
 
@@ -640,11 +696,13 @@ def evaluate_seen_tasks(
     max_input_length: int = 1024,
     per_device_eval_batch_size: int = 8,
     max_new_tokens: int = 64,
-    task_eval_samples: int = 64,
+    task_eval_samples: int | None = None,
     seed: int = 42,
     split_seed: int | None = None,
+    log_predictions: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
+    task_eval_samples = _resolve_task_eval_samples(task_eval_samples, eval_size)
     _warn_if_samples_exceed_split(task_eval_samples, eval_size)
 
     for task in seen_tasks:
@@ -664,9 +722,17 @@ def evaluate_seen_tasks(
             max_input_length=max_input_length,
             primary_metric=_primary_metric_name(task),
         )
+        examples = task_metrics.pop("examples", [])
+        predictions_log = (
+            _write_prediction_log(output_dir, task_name, examples)
+            if log_predictions
+            else None
+        )
         out[task_name] = {
             **task_metrics,
         }
+        if predictions_log:
+            out[task_name]["predictions_log"] = predictions_log
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -681,11 +747,12 @@ def evaluate_seen_tasks_perplexity(
     eval_size: int = 200,
     max_seq_length: int = 1024,
     per_device_eval_batch_size: int = 8,
-    task_eval_samples: int = 64,
+    task_eval_samples: int | None = None,
     seed: int = 42,
     split_seed: int | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
+    task_eval_samples = _resolve_task_eval_samples(task_eval_samples, eval_size)
     _warn_if_samples_exceed_split(task_eval_samples, eval_size)
 
     for task in seen_tasks:
@@ -716,7 +783,9 @@ def evaluate_all(
     general_eval_task_keys: list[str] | None = None,
     general_eval_batch_size: int = 8,
     eval_size: int = 200,
-    task_eval_samples: int = 64,
+    # None = score every question in the held-out split (see
+    # _resolve_task_eval_samples); pass an int to score only the first n.
+    task_eval_samples: int | None = None,
     task_eval_max_new_tokens: int = 64,
     # Prompt/sequence budget for seen-task eval. Should track the run's training
     # max_seq_length so eval prompts are truncated the same way training was;
@@ -724,6 +793,8 @@ def evaluate_all(
     max_input_length: int = 1024,
     quick_eval: bool = False,
     skip_general_eval: bool = False,
+    # Write every scored (prompt, response) pair to <output_dir>/predictions/.
+    log_predictions: bool = True,
     seed: int = 42,
     # Pins which questions form the held-out set, independently of the training
     # seed. Must match the value the checkpoint was trained under, or the eval
@@ -731,6 +802,7 @@ def evaluate_all(
     split_seed: int | None = None,
 ) -> Dict[str, Any]:
     set_global_seed(seed)
+    task_eval_samples = _resolve_task_eval_samples(task_eval_samples, eval_size)
 
     # Try to compile the model for faster repeated forward passes.
     # The compiled wrapper shares parameters with the original model
@@ -766,6 +838,7 @@ def evaluate_all(
             task_eval_samples=task_eval_samples,
             seed=seed,
             split_seed=split_seed,
+            log_predictions=log_predictions,
         )
 
     # -- general evaluation (original model for lm-eval HFLM compat) --
