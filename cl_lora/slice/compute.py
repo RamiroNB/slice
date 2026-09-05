@@ -44,6 +44,10 @@ def _lora_ga_incompatible_flags(config: SliceInitConfig) -> List[str]:
         invalid_flags.append("single_retain_task_mode")
     if float(config.retain_scale) != 1.0:
         invalid_flags.append("retain_scale")
+    if float(getattr(config, "dot_significance_k", 0.0)) != 0.0:
+        invalid_flags.append("dot_significance_k")
+    if getattr(config, "gamma_rel_cap", None) is not None:
+        invalid_flags.append("gamma_rel_cap")
     return invalid_flags
 
 
@@ -158,6 +162,10 @@ def compute_slice_inits(
 
     grads_r = None
     steps_r = 0
+    # Per-retain-batch samples of <g_current_raw, g_retain_batch>; scaled after
+    # normalization so their mean equals the global dot the projection gates on.
+    raw_dot_samples: List[float] = []
+    collect_dots = bool(config.grad_project)
     if retain_tasks:
         if config.single_retain_task_mode:
             retain_tasks = [retain_tasks[-1]]
@@ -194,6 +202,8 @@ def compute_slice_inits(
             grads_r, steps_r = accumulate_gradients(
                 model=model, dataloader=retain_loader, target_params=target_params,
                 device=device, max_steps=retain_max_steps,
+                dot_reference=grads_current if collect_dots else None,
+                dot_samples=raw_dot_samples if collect_dots else None,
             )
         elif config.retain_batch_size_set == "each_task":
             grads_r = {name: torch.zeros_like(param, device=device) for name, param in target_params.items()}
@@ -218,6 +228,8 @@ def compute_slice_inits(
                 grads_r, steps_rt = accumulate_gradients(
                     model=model, dataloader=rt_loader, target_params=target_params,
                     device=device, max_steps=retain_max_steps, grads=grads_r,
+                    dot_reference=grads_current if collect_dots else None,
+                    dot_samples=raw_dot_samples if collect_dots else None,
                 )
                 steps_r += steps_rt
                 logger.info("Accumulated retain grads for task=%s: steps=%d", rt_name, steps_rt)
@@ -238,6 +250,15 @@ def compute_slice_inits(
     if grads_r is not None:
         denom_r = max(1, steps_r)
         grads_r = {k: v / float(denom_r) for k, v in grads_r.items()}
+    # Scale the raw per-batch dots so that mean(dot_samples) equals the global
+    # dot computed on the normalized gradients: each raw sample used the raw
+    # (un-normalized) current-gradient sum as its reference.
+    dot_samples = [s / float(denom_c) for s in raw_dot_samples]
+    if dot_samples:
+        logger.info(
+            "Collected %d per-batch conflict-dot samples: mean=%.6g",
+            len(dot_samples), sum(dot_samples) / len(dot_samples),
+        )
 
     if config.grad_project and grads_r is not None:
         method = str(config.projection_method).lower()
@@ -249,6 +270,13 @@ def compute_slice_inits(
             or bool(config.magnitude_preserve)
         )
         if use_advanced:
+            if float(config.dot_significance_k) != 0.0 or config.gamma_rel_cap is not None:
+                logger.warning(
+                    "dot_significance_k / gamma_rel_cap are only implemented for the "
+                    "basic pcgrad path and are IGNORED by the advanced projection "
+                    "(method=%s cosine_threshold=%s).",
+                    method, config.cosine_threshold,
+                )
             logger.info(
                 "Advanced projection: method=%s mode=%s cos_tau=%s per_layer=%s mag_preserve=%s",
                 method,
@@ -289,6 +317,9 @@ def compute_slice_inits(
                 always_project=config.grad_project_always,
                 add_retain_grad=config.add_retain_grad,
                 return_stats=True,
+                dot_samples=dot_samples,
+                significance_k=float(config.dot_significance_k),
+                gamma_rel_cap=config.gamma_rel_cap,
             )
             projection_stats["applied"] = True
             logger.info("Built projected gradient matrix for %d modules", len(combined))
@@ -401,8 +432,18 @@ def summarize_projection_stats(projection_stats: Dict[str, Any]) -> Dict[str, An
         "mode": projection_stats.get("mode"),
         "fired": fired,
         "gamma": None if gamma is None else float(gamma),
+        "gamma_raw": g.get("gamma_raw"),
         "cos": g.get("cos"),
         "dot": g.get("dot", g.get("sum_dot")),
+        # Significance-gate readout (basic pcgrad global mode with per-batch
+        # dot sampling; None on legacy stats).
+        "dot_mean": g.get("dot_mean"),
+        "dot_se": g.get("dot_se"),
+        "n_dot_samples": g.get("n_dot_samples"),
+        "significant": g.get("significant"),
+        "gated_by_significance": g.get("gated_by_significance"),
+        "significance_k": projection_stats.get("significance_k"),
+        "gamma_rel_cap": projection_stats.get("gamma_rel_cap"),
         "rel_change": rel_change,
         "n_modules_conflict": n_conflict,
         "n_modules_total": n_total,
@@ -485,6 +526,20 @@ def load_or_compute_slice_inits(
         "nullspace_rank": 0 if is_lora_ga else int(config.nullspace_rank),
         "nullspace_sv_threshold": 0.0 if is_lora_ga else float(config.nullspace_sv_threshold),
         "svd_selection": str(config.svd_selection),
+        # The significance gate and gamma cap change the projected gradient, so
+        # they must key the cache. Injected only when set, so legacy entries
+        # stay reachable under their existing keys. (Both are rejected for
+        # lora_ga by the guard above, so no is_lora_ga canonicalization needed.)
+        **(
+            {"dot_significance_k": float(config.dot_significance_k)}
+            if float(config.dot_significance_k) != 0.0
+            else {}
+        ),
+        **(
+            {"gamma_rel_cap": float(config.gamma_rel_cap)}
+            if config.gamma_rel_cap is not None
+            else {}
+        ),
         # Completion-only masking changes the loss the probe differentiates, so it
         # must key the cache. Injected only when enabled, so inits already cached
         # under the legacy full-sequence objective stay reachable in legacy mode.

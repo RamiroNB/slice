@@ -26,7 +26,7 @@ try:
     from .data import build_collator, tokenize_dataset
     from .load_dataset import configure_prompt_tokenizer, load_training_dataset
     from .lora_config import build_lora_config
-    from .repro import set_global_seed
+    from .repro import set_global_seed, strict_determinism_enabled
     from .slice import (
         SliceInitConfig,
         assert_slice_flags_require_slice_init,
@@ -37,7 +37,7 @@ except ImportError:
     from data import build_collator, tokenize_dataset  # type: ignore[no-redef]
     from load_dataset import configure_prompt_tokenizer, load_training_dataset  # type: ignore[no-redef]
     from lora_config import build_lora_config
-    from repro import set_global_seed
+    from repro import set_global_seed, strict_determinism_enabled
     from slice import (  # type: ignore[no-redef]
         SliceInitConfig,
         assert_slice_flags_require_slice_init,
@@ -126,11 +126,19 @@ def load_base_model(
         token=hf_token,
         local_files_only=local,
     )
-    try:
-        import flash_attn  # noqa: F401
-        kwargs["attn_implementation"] = "flash_attention_2"
-    except ImportError:
-        pass
+    if strict_determinism_enabled():
+        # flash-attention-2's backward is nondeterministic (atomicAdd
+        # accumulation order), which is enough to make two runs from a
+        # bit-identical init diverge by whole points after one stage. Eager
+        # attention is fully deterministic; slower, but --deterministic runs
+        # trade speed for bit-reproducibility.
+        kwargs["attn_implementation"] = "eager"
+    else:
+        try:
+            import flash_attn  # noqa: F401
+            kwargs["attn_implementation"] = "flash_attention_2"
+        except ImportError:
+            pass
     model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
 
     # Report which attention implementation is actually in use.
@@ -375,6 +383,8 @@ def train_on_task(
     slice_nullspace_rank: int = 8,
     slice_nullspace_sv_threshold: float = 0.0,
     slice_svd_selection: str = "lora_ga",
+    slice_dot_significance_k: float = 0.0,
+    slice_gamma_rel_cap: float | None = None,
     cl_method: CLMethod | None = None,
     stage_idx: int = 1,
 ) -> Tuple[Any, Dict[str, Any]]:
@@ -488,6 +498,8 @@ def train_on_task(
             nullspace_rank=slice_nullspace_rank,
             nullspace_sv_threshold=slice_nullspace_sv_threshold,
             svd_selection=slice_svd_selection,
+            dot_significance_k=slice_dot_significance_k,
+            gamma_rel_cap=slice_gamma_rel_cap,
             # SD-LoRA keeps W0 pristine (absorption is realized in the forward
             # override), so never physically absorb into the base weights here.
             skip_absorption=force_skip_absorption,
@@ -595,6 +607,10 @@ def train_on_task(
         report_to="none",
         remove_unused_columns=True,
         seed=seed,
+        # In --deterministic mode the Trainer calls enable_full_determinism
+        # (deterministic algorithms as hard errors, TF32 off) instead of the
+        # plain set_seed, matching what set_global_seed did for the init probe.
+        full_determinism=strict_determinism_enabled(),
     )
 
     if gradient_checkpointing:
@@ -697,6 +713,12 @@ def train_on_task(
         "task_name": getattr(task, "name", str(task)),
         "train_metrics": train_result.metrics,
         "eval_metrics": eval_metrics,
+        # Per-logging-step history straight from the Trainer: loss, grad_norm,
+        # learning_rate, epoch (plus interleaved eval rows). This is the only
+        # place per-step gradient norms are recorded, so keep it in the stage
+        # report where it survives checkpoint/cache pruning. Size is bounded by
+        # num_steps/logging_steps rows of a few floats each.
+        "log_history": _to_serializable(list(getattr(trainer.state, "log_history", []) or [])),
         "ba_norms": {
             "init": ba_norms_init,
             "final": ba_norms_final,

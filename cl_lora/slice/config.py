@@ -90,3 +90,15 @@ class SliceInitConfig:
     # or "top_r_no_sigma" (B=U[:,:r], A=V[:,:r]^T without singular-value weighting).
     svd_selection: str = "lora_ga"
     skip_absorption: bool = False
+    # Significance gate on the global conflict test (pcgrad global mode only).
+    # The global dot is estimated from per-retain-batch samples; with k > 0 the
+    # projection fires only when dot < 0 AND |dot| > k * SE(dot). At k = 0 the
+    # legacy sign-of-a-single-point-estimate rule applies — which measured
+    # cos(g_c, g_r) ≈ 0.01-0.07 on converged retain tasks, i.e. a coin flip.
+    dot_significance_k: float = 0.0
+    # Cap on the projection's relative strength: |gamma|*||g_r|| <= cap*||g_c||.
+    # PCGrad's gamma = |dot|/||g_r||^2 explodes when the retain gradient is tiny
+    # (observed gamma = 89 from dot = -0.3 at ||g_r||^2 = 0.003); the cap bounds
+    # the correction to at most `cap` times the current gradient's norm.
+    # None = uncapped (legacy behaviour).
+    gamma_rel_cap: Optional[float] = None
