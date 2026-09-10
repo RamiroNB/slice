@@ -66,9 +66,24 @@ def _import_lm_eval_modules():
     return lm_eval, hflm_module.HFLM
 
 
-def _build_hflm(model, tokenizer, device: str = "cuda", dtype: str = "bfloat16"):
+def _build_hflm(
+    model,
+    tokenizer,
+    device: str = "cuda",
+    dtype: str = "bfloat16",
+    batch_size: int | None = None,
+):
+    # batch_size has to be set HERE, not on simple_evaluate(). lm_eval only applies its
+    # own batch_size argument when `model` is a string it instantiates itself; handed an
+    # already-built LM object it does `lm = model` and drops the argument silently.
+    # Without this every lm_eval task ran at HFLM's default batch_size=1.
     _, hflm_cls = _import_lm_eval_modules()
-    return hflm_cls(pretrained=model, tokenizer=tokenizer, device=device, dtype=dtype)
+    kwargs = {}
+    if batch_size is not None:
+        kwargs["batch_size"] = batch_size
+    return hflm_cls(
+        pretrained=model, tokenizer=tokenizer, device=device, dtype=dtype, **kwargs
+    )
 
 
 @contextlib.contextmanager
@@ -586,7 +601,13 @@ def evaluate_general_tasks(
     eval_task_keys = eval_task_keys or CORE_EVAL_TASKS
     lm_eval, _ = _import_lm_eval_modules()
     with _left_padding_for_generation(tokenizer):
-        lm = _build_hflm(model=model, tokenizer=tokenizer, device=device, dtype=dtype)
+        lm = _build_hflm(
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            dtype=dtype,
+            batch_size=batch_size,
+        )
 
         lm_eval_keys = [k for k in eval_task_keys if k != "alpaca"]
         has_alpaca = "alpaca" in eval_task_keys
